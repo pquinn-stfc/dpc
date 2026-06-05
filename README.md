@@ -87,8 +87,8 @@ Uses Otsu thresholding (`get_beam`) to locate the direct beam automatically,
 
 **`dpc_recon`** — Phase retrieval.
 Standalone functions (`kottler`, `arnison`, `frankt`, `ishizuka`, `scs`,
-`lazic`) and a unified `phase_retrieval` dispatcher that accepts plain numpy
-arrays via a thin HyperSpy-compatible adapter.
+`lazic`) and a unified `phase_retrieval(dx, dy, calX, calY, method)` dispatcher
+that takes plain numpy arrays.
 
 **`mask_tools`** — Pixel quality and region masks.
 `build_pixel_mask` handles both quick (single-frame Hampel) and full
@@ -180,7 +180,8 @@ dx = (com_map[..., 1] - com_map[..., 1].mean()) * ds.com_scale
 dy = (com_map[..., 0] - com_map[..., 0].mean()) * ds.com_scale
 
 # Phase retrieval
-phase = phase_retrieval(signal, method='kottler')
+phase = phase_retrieval(dx, dy, calX=ds.scan_step_x, calY=ds.scan_step_y,
+                        method='kottler')
 ```
 
 ### HDF5 field mapping

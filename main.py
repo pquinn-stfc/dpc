@@ -161,7 +161,9 @@ def run(args):
     if not args.no_phase:
         print(f'Retrieving phase using {args.method!r} method ...')
         phase = phase_retrieval(
-            _GradientSignal(dx, dy, ds.scan_step_x, ds.scan_step_y),
+            dx, dy,
+            calX=ds.scan_step_x,
+            calY=ds.scan_step_y,
             method=args.method,
         )
         print(f'  phase range: {phase.min():.4f} – {phase.max():.4f} rad')
@@ -209,33 +211,6 @@ def run(args):
                 print(f'  {p_}')
 
     print('Done.')
-
-
-# ---------------------------------------------------------------------------
-# Minimal adapter so phase_retrieval() can accept plain numpy arrays instead
-# of a HyperSpy signal.
-# ---------------------------------------------------------------------------
-
-class _GradientSignal:
-    '''Thin wrapper exposing the axes_manager interface expected by phase_retrieval.'''
-
-    def __init__(self, dx, dy, step_x, step_y):
-        nr, nc = dx.shape
-        self.data = np.stack([dy, dx], axis=-1)     # (..., 0)=dy  (..., 1)=dx
-        self.axes_manager = _AxesManager(nc, nr, step_x, step_y)
-
-
-class _AxesManager:
-    def __init__(self, nc, nr, step_x, step_y):
-        self.navigation_axes = [
-            _Axis(nc, step_x),
-            _Axis(nr, step_y),
-        ]
-
-
-class _Axis:
-    def __init__(self, size, step):
-        self.axis = np.arange(size) * step
 
 
 if __name__ == '__main__':

@@ -310,6 +310,104 @@ def lazic(dx, dy, calX=1, calY=1, high_pass_filter=False, highpass=0.0,
     return retrieved
 
 
+def _make_window_scs(height, width):
+    '''Build the frequency-domain window for the SCS phase retrieval method.
+
+    Parameters
+    ----------
+    height : int
+    width : int
+
+    Returns
+    -------
+    sin_u : ndarray
+    sin_v : ndarray
+    window : ndarray
+        Complex integration kernel; DC component is zeroed.
+    '''
+    ulist = np.arange(width) / width
+    vlist = np.arange(height) / height
+    u, v = np.meshgrid(ulist, vlist)
+    sin_u = np.sin(2 * np.pi * u)
+    sin_v = np.sin(2 * np.pi * v)
+    sin_u2 = np.sin(np.pi * u) ** 2
+    sin_v2 = np.sin(np.pi * v) ** 2
+    window = sin_u2 + sin_v2
+    window[0, 0] = 1.0
+    window = 1.0 / (4j * window)
+    window[0, 0] = 0.0
+    return sin_u, sin_v, window
+
+
+def scs(dx, dy, pad=0, pad_mode="linear_ramp", correct_negative=True,
+        window=None):
+    '''Phase retrieval using the Simchony-Chellappa-Shao (SCS) method.
+
+    Note: the DC component (mean value) of the reconstructed phase is
+    undefined because the DC component of the FFT window is zero.
+
+    Parameters
+    ----------
+    dx : ndarray
+        Phase gradient in x.
+    dy : ndarray
+        Phase gradient in y.
+    pad : int, optional
+        Width of padding applied to each edge before reconstruction, removed
+        afterwards.  Default 0 (no padding).
+    pad_mode : str, optional
+        Padding mode passed to ``numpy.pad``.  Default ``'linear_ramp'``.
+    correct_negative : bool, optional
+        If True, shift the result so the minimum value is non-negative.
+        Default True.
+    window : tuple of ndarray, optional
+        Pre-computed (sin_u, sin_v, window) from ``_make_window_scs``.
+        Computed from the (padded) array shape if not supplied.
+
+    Returns
+    -------
+    retrieved : ndarray of float32
+        Retrieved phase.
+
+    References
+    ----------
+    Simchony, T., Chellappa, R. and Shao, M., 1990. Direct analytical methods
+    for solving Poisson equations in computer vision problems. IEEE TPAMI,
+    12(5), pp.435-446. https://doi.org/10.1109/34.55103
+    '''
+    if dx.shape != dy.shape:
+        raise ValueError("dx and dy must have the same shape")
+
+    if pad:
+        dx = np.pad(dx, pad, mode=pad_mode)
+        dy = np.pad(dy, pad, mode=pad_mode)
+
+    height, width = dx.shape
+    if window is None:
+        sin_u, sin_v, win = _make_window_scs(height, width)
+    else:
+        if len(window) != 3:
+            raise ValueError("window must be a 3-tuple (sin_u, sin_v, window)")
+        sin_u, sin_v, win = window
+        if win.shape != dx.shape:
+            raise ValueError(
+                f"window shape {win.shape} does not match array shape {dx.shape}"
+            )
+
+    fmat = sin_u * np.fft.fft2(dx) + sin_v * np.fft.fft2(dy)
+    retrieved = np.real(np.fft.ifft2(fmat * win))
+
+    if pad:
+        retrieved = retrieved[pad:-pad, pad:-pad]
+
+    if correct_negative:
+        nmin = retrieved.min()
+        if nmin < 0.0:
+            retrieved -= 2 * nmin
+
+    return retrieved.astype(np.float32)
+
+
 def phase_grad_norm(dx, dy):
     '''Compute the norm of the phase gradient
 
@@ -446,29 +544,36 @@ def ishizuka(dx, dy, calX, calY, approx=False):
 
     return retrieved.real
 
-def phase_retrieval(dpc_sig, method="kottler", mirroring=False, mirror_flip=False):
+def phase_retrieval(dx, dy, calX=1.0, calY=1.0, method="kottler",
+                    mirroring=False, mirror_flip=False):
     """Retrieve the phase from two orthogonal phase gradients.
 
     Parameters
     ----------
-    dpc_sig : HyperSpy signal
-        contains the centre of mass in x and
+    dx : ndarray, shape (scan_y, scan_x)
+        Phase gradient in x, in rad/m.
+    dy : ndarray, shape (scan_y, scan_x)
+        Phase gradient in y, in rad/m.
+    calX : float, optional
+        Scan step size in x (metres).  Used by the Arnison and Ishizuka
+        methods.  Default 1.
+    calY : float, optional
+        Scan step size in y (metres).  Default 1.
     method : str, optional
         the formula to use: 'kottler'[1], 'arnison'[2], 'frankot'[3],
         'ishizuka', or 'scs'[4]. The default is 'kottler'.
     mirroring : bool, optional
-        whether to mirror the phase gradients before Fourier transformed.
-        Attempt to reduce boundary effect. The default is False.
+        Mirror the phase gradients before the Fourier transform to reduce
+        boundary artefacts. The default is False.
     mirror_flip : bool, optional
-        only active when 'mirroring' is True. Flip the direction of the
-        derivatives which results in negation during signal mirroring.
-        The default is False. If the retrieved phase is not sensible after
-        mirroring, set this to True may resolve it.
+        Only active when ``mirroring`` is True. Flip the sign convention of
+        the mirroring. If the retrieved phase looks wrong with mirroring
+        enabled, try setting this to True. The default is False.
 
     Raises
     ------
     ValueError
-        if the method is not implemented
+        if the method is not recognised
 
     Returns
     -------
@@ -492,8 +597,6 @@ def phase_retrieval(dpc_sig, method="kottler", mirroring=False, mirror_flip=Fals
     methods for solving Poisson equations in computer vision problems.
     IEEE TPAMI, 12(5), pp.435-446. https://doi.org/10.1109/34.55103
     """
-
-
     method = method.lower()
     if method not in ("kottler", "arnison", "frankot", "ishizuka", "scs"):
         raise ValueError(
@@ -501,10 +604,9 @@ def phase_retrieval(dpc_sig, method="kottler", mirroring=False, mirror_flip=Fals
             " 'ishizuka' and 'scs' are available.".format(method)
         )
 
-    # get x and y phase gradient
-    dx = dpc_sig.data[:,:,1].copy()   # dx
-    dy = dpc_sig.data[:,:,0].copy()   # dy
-    # compatibility criteria
+    # compatibility criteria — remove mean so integration has a unique solution
+    dx = np.asarray(dx, dtype=float).copy()
+    dy = np.asarray(dy, dtype=float).copy()
     dx -= dx.mean()
     dy -= dy.mean()
 
@@ -529,10 +631,6 @@ def phase_retrieval(dpc_sig, method="kottler", mirroring=False, mirror_flip=Fals
             dy = np.bmat([[Ay, -By], [Cy, -Dy]]).A
 
     nc, nr = dx.shape[1], dx.shape[0]
-
-    # get scan step size
-    calX = np.diff(dpc_sig.axes_manager.navigation_axes[0].axis).mean()
-    calY = np.diff(dpc_sig.axes_manager.navigation_axes[1].axis).mean()
 
     # construct Fourier-space grids
     kx = (2 * np.pi) * np.fft.fftshift(np.fft.fftfreq(nc))
