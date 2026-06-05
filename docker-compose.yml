@@ -1,0 +1,59 @@
+services:
+
+  # -----------------------------------------------------------------------
+  # dpc: run the full DPC pipeline on a single NeXus file.
+  #
+  # Required environment variables (set in .env or export before running):
+  #   INPUT_FILE   - filename of the NeXus scan file inside /data
+  #   MAPPING_YAML - path to the HDF5 field-mapping YAML (default: config/i14_mapping.yaml)
+  #
+  # Example:
+  #   INPUT_FILE=i14-98400.nxs docker compose run --rm dpc
+  #   INPUT_FILE=i14-98400.nxs docker compose run --rm dpc --method arnison --format hdf5 png
+  # -----------------------------------------------------------------------
+  dpc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dpc:latest
+    volumes:
+      - ${DATA_DIR:-./data}:/data:ro          # input NeXus files (read-only)
+      - ${RESULTS_DIR:-./results}:/results    # output HDF5 / images
+      - ${CONFIG_DIR:-./config}:/app/config   # mapping YAML files
+    environment:
+      - NUMBA_CACHE_DIR=/tmp/numba_cache
+    command: >
+      /data/${INPUT_FILE}
+      ${MAPPING_YAML:-/app/config/i14_mapping.yaml}
+      --output /results/${OUTPUT_STEM:-dpc_output}
+      --format ${FORMAT:-hdf5}
+      --method ${METHOD:-kottler}
+      --crop-size ${CROP_SIZE:-256}
+
+  # -----------------------------------------------------------------------
+  # dpc-batch: process every *.nxs file in /data.
+  # Wraps main.py in a small shell loop; output files share the input stem.
+  # -----------------------------------------------------------------------
+  dpc-batch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dpc:latest
+    volumes:
+      - ${DATA_DIR:-./data}:/data:ro
+      - ${RESULTS_DIR:-./results}:/results
+      - ${CONFIG_DIR:-./config}:/app/config
+    environment:
+      - NUMBA_CACHE_DIR=/tmp/numba_cache
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "for f in /data/*.nxs; do
+         stem=$(basename \"$$f\" .nxs);
+         echo \"Processing $$stem ...\";
+         python main.py \"$$f\"
+           ${MAPPING_YAML:-/app/config/i14_mapping.yaml}
+           --output /results/$$stem
+           --format ${FORMAT:-hdf5}
+           --method ${METHOD:-kottler}
+           --crop-size ${CROP_SIZE:-256};
+       done"

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dpc"
+version = "0.1.0"
+description = "Differential phase contrast imaging for scanning X-ray nanoprobe beamlines"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Paul Quinn", email = "paul.quinn@diamond.ac.uk" },
+]
+keywords = ["DPC", "differential phase contrast", "X-ray", "phase retrieval", "synchrotron"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-image",
+    "numba",
+    "h5py",
+    "pyyaml",
+    "pillow",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+cwl = [
+    "cwltool",
+]
+
+[project.scripts]
+dpc = "dpc.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.hatch.envs.default]
+dependencies = ["pytest", "pytest-cov"]
+
+[tool.hatch.envs.default.scripts]
+test = "pytest {args}"
