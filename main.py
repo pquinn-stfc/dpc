@@ -54,6 +54,8 @@ def parse_args(argv=None):
                    help='Use full pixel-masking mode instead of quick mode')
     p.add_argument('--no-phase', action='store_true',
                    help='Skip phase retrieval')
+    p.add_argument('--debug', action='store_true',
+                   help='Save a diagnostic figure showing masks and overlays')
     return p.parse_args(argv)
 
 
@@ -213,6 +215,30 @@ def run(args):
             saved = save_images(base, fmt, **image_common)
             for p_ in saved:
                 print(f'  {p_}')
+
+    # ------------------------------------------------------------------
+    # 9. Debug figure
+    # ------------------------------------------------------------------
+    if args.debug:
+        from visualisation import save_debug
+        save_debug(
+            base,
+            sample_frame      = sample_frame,
+            filtered_frame    = filtered_for_beam,
+            pixel_mask        = pixel_mask,
+            beam_mask         = beam_mask,
+            com_mask          = com_mask,
+            bbox              = bbox,
+            cropped_x         = cropped_x,
+            cropped_y         = cropped_y,
+            com_map           = com_map,
+            dx                = dx,
+            dy                = dy,
+            grad_norm         = grad_norm,
+            phase             = phase,
+            scan_step_x       = ds.scan_step_x,
+            scan_step_y       = ds.scan_step_y,
+        )
 
     print('Done.')
 
