@@ -22,7 +22,7 @@ FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="dpc" \
       org.opencontainers.image.description="Differential phase contrast imaging for scanning X-ray nanoprobe beamlines" \
-      org.opencontainers.image.authors="paul.quinn@diamond.ac.uk" \
+      org.opencontainers.image.authors="paul.quinn" \
       org.opencontainers.image.source="https://github.com/pquinn-stfc/dpc"
 
 # Copy installed packages from the builder stage
