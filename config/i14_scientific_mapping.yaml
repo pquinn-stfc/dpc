@@ -1,0 +1,63 @@
+# ScientificDataset mapping for Diamond I14 Merlin detector data.
+# Use with load_scientific() in hdf5_loader.
+#
+# The 'data' field is the main N-D array.
+# 'axes' lists one entry per dimension, in array order (outermost first).
+# 'signal_type' is a free-form label for the kind of measurement.
+#
+# Each 'scale' / 'offset' entry accepts the same field-spec syntax as
+# any other mapping field: bare value, or dict with path/value/default/
+# transform/scale keys.
+
+data:
+  path: /entry/instrument/merlin/data
+  keep_array: true
+
+signal_type: DPC
+
+axes:
+  - name: scan_y
+    navigate: true
+    units: m
+    scale:
+      path: /entry/scan/sample_y/value
+      transform: step_from_positions_um
+      default: 50.0
+    offset:
+      value: 0.0
+
+  - name: scan_x
+    navigate: true
+    units: m
+    scale:
+      path: /entry/scan/sample_x/value
+      transform: step_from_positions_um
+      default: 50.0
+    offset:
+      value: 0.0
+
+  - name: det_y
+    navigate: false
+    units: m
+    scale:
+      path: /entry/instrument/merlin/pixel_size
+      transform: um_to_m
+      default: 55.0
+
+  - name: det_x
+    navigate: false
+    units: m
+    scale:
+      path: /entry/instrument/merlin/pixel_size
+      transform: um_to_m
+      default: 55.0
+
+# Scalar metadata fields — resolved alongside the main array
+beam_energy:
+  path: /entry/instrument/monochromator/energy
+  default: 12.0
+
+detector_distance:
+  path: /entry/instrument/merlin/distance
+  transform: mm_to_m
+  default: 2.0
