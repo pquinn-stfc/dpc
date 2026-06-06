@@ -31,13 +31,19 @@ import numpy as np
 # Axis
 # ---------------------------------------------------------------------------
 
-@dataclass
 class Axis:
     '''A single labelled, calibrated axis of a :class:`ScientificDataset`.
 
-    Physical coordinates along the axis are::
+    Supports two modes:
+
+    **Linear** (equally spaced) — described by ``offset`` and ``scale``::
 
         coordinate[i] = offset + i * scale
+
+    **Arbitrary** — an explicit 1-D coordinate array stored in ``_values``.
+    Use :meth:`from_array` to construct this form.  Any scan with irregular
+    spacing (fly-scan, variable-step energy scan near an absorption edge,
+    encoder readback) should use the arbitrary form.
 
     Parameters
     ----------
@@ -49,28 +55,180 @@ class Axis:
         ``True`` for navigation (scan/map) axes; ``False`` for signal
         (detector/spectrum) axes.
     scale : float
-        Physical size of one pixel/channel in ``units``.  Default 1.
+        Mean physical step size, in ``units``.  For a linear axis this is
+        the exact step; for an arbitrary axis it is computed from the
+        coordinate array on construction.  Default 1.
     offset : float
         Physical coordinate of the first point.  Default 0.
     units : str
-        Physical unit string, e.g. ``"m"``, ``"keV"``, ``"px"``.
+        Physical unit string, e.g. ``"m"``, ``"keV"``.
     '''
-    name: str
-    size: int
-    navigate: bool = False
-    scale: float = 1.0
-    offset: float = 0.0
-    units: str = ""
+
+    def __init__(
+        self,
+        name: str,
+        size: int,
+        navigate: bool = False,
+        scale: float = 1.0,
+        offset: float = 0.0,
+        units: str = "",
+        _values: Optional[np.ndarray] = None,
+    ):
+        self.name     = name
+        self.size     = size
+        self.navigate = navigate
+        self.units    = units
+        self._values  = None
+
+        if _values is not None:
+            vals = np.asarray(_values, dtype=float)
+            if vals.ndim != 1 or len(vals) != size:
+                raise ValueError(
+                    f"Axis {name!r}: _values must be 1-D of length {size}, "
+                    f"got shape {vals.shape}."
+                )
+            self._values = vals
+            self.offset  = float(vals[0])
+            # mean step — used as a summary and as calX/calY for phase retrieval
+            self.scale   = float(np.diff(vals).mean()) if len(vals) > 1 else 1.0
+        else:
+            self.scale  = float(scale)
+            self.offset = float(offset)
+
+    # ------------------------------------------------------------------
+    # Alternate constructors
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_array(
+        cls,
+        name: str,
+        values: np.ndarray,
+        navigate: bool = False,
+        units: str = "",
+    ) -> "Axis":
+        '''Construct an axis from an explicit coordinate array.
+
+        Use this when positions are not equally spaced — e.g. a fly-scan
+        with encoder readback, or an energy axis with fine steps near an
+        absorption edge and coarse steps away from it.
+
+        Parameters
+        ----------
+        name : str
+        values : array-like, shape (N,)
+            Physical coordinates in ``units``, one per data point.
+        navigate : bool
+        units : str
+
+        Example
+        -------
+        ::
+
+            # Variable-step XANES energy axis
+            energy_eV = np.array([7090, 7100, 7105, 7108, 7110, 7112,
+                                   7115, 7120, 7130, 7150, 7200])
+            ax = Axis.from_array("energy", energy_eV, units="eV")
+        '''
+        values = np.asarray(values, dtype=float)
+        return cls(name=name, size=len(values), navigate=navigate,
+                   units=units, _values=values)
+
+    # ------------------------------------------------------------------
+    # Coordinate array
+    # ------------------------------------------------------------------
 
     @property
     def axis(self) -> np.ndarray:
-        '''1-D array of physical coordinates along this axis.'''
+        '''1-D array of physical coordinates along this axis.
+
+        Returns the stored coordinate array for arbitrary axes, or a
+        linearly-spaced array for uniform axes.
+        '''
+        if self._values is not None:
+            return self._values
         return self.offset + np.arange(self.size) * self.scale
+
+    # ------------------------------------------------------------------
+    # Uniformity
+    # ------------------------------------------------------------------
+
+    @property
+    def is_uniform(self) -> bool:
+        '''True if the axis is (or was defined as) equally spaced.
+
+        For axes constructed with :meth:`from_array`, checks whether all
+        steps are within 0.1 % of each other.
+        '''
+        if self._values is None:
+            return True
+        steps = np.diff(self._values)
+        return bool(np.allclose(steps, steps[0], rtol=1e-3))
+
+    @property
+    def step_size(self) -> float:
+        '''Mean step size in physical units.
+
+        For uniform axes this is exact.  For irregular axes it is the mean
+        of all inter-point spacings — useful as ``calX``/``calY`` for phase
+        retrieval where a representative pixel size is needed.
+        '''
+        if self._values is not None:
+            return float(np.diff(self._values).mean())
+        return self.scale
+
+    # ------------------------------------------------------------------
+    # Coordinate lookup
+    # ------------------------------------------------------------------
+
+    def coord_to_index(self, coord: float) -> int:
+        '''Find the nearest array index for a physical coordinate.
+
+        Uses exact arithmetic for uniform axes and :func:`numpy.searchsorted`
+        for arbitrary axes.
+
+        Parameters
+        ----------
+        coord : float
+            Physical coordinate in the axis units.
+
+        Returns
+        -------
+        int
+            Nearest index, clamped to ``[0, size - 1]``.
+        '''
+        if self._values is not None:
+            # searchsorted then pick nearest neighbour
+            idx = int(np.searchsorted(self._values, coord))
+            if idx >= self.size:
+                return self.size - 1
+            if idx == 0:
+                return 0
+            # compare with left neighbour
+            if abs(self._values[idx - 1] - coord) < abs(self._values[idx] - coord):
+                return idx - 1
+            return idx
+        # Linear
+        idx = int(round((coord - self.offset) / self.scale))
+        return max(0, min(idx, self.size - 1))
+
+    def index_to_coord(self, index: int) -> float:
+        '''Physical coordinate for a given array index.'''
+        if self._values is not None:
+            return float(self._values[index])
+        return self.offset + index * self.scale
+
+    # ------------------------------------------------------------------
+    # Repr
+    # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
         kind = "nav" if self.navigate else "sig"
-        return (f"Axis({self.name!r}, size={self.size}, {kind}, "
-                f"scale={self.scale}, units={self.units!r})")
+        if self._values is not None:
+            tag = f"irregular, mean_step={self.step_size:.3g}"
+        else:
+            tag = f"scale={self.scale:.3g}"
+        return f"Axis({self.name!r}, size={self.size}, {kind}, {tag}, units={self.units!r})"
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +389,9 @@ class ScientificDataset:
     def coord_to_index(self, axis_name: str, coord: float) -> int:
         '''Convert a physical coordinate to the nearest array index.
 
+        Delegates to :meth:`Axis.coord_to_index`, which uses exact arithmetic
+        for uniform axes and nearest-neighbour search for irregular ones.
+
         Parameters
         ----------
         axis_name : str
@@ -247,9 +408,7 @@ class ScientificDataset:
         -------
         >>> idx = ds.coord_to_index("scan_x", 1.0e-6)   # 1 µm → pixel index
         '''
-        ax = self.get_axis(axis_name)
-        idx = int(round((coord - ax.offset) / ax.scale))
-        return max(0, min(idx, ax.size - 1))
+        return self.get_axis(axis_name).coord_to_index(coord)
 
     def index_to_coord(self, axis_name: str, index: int) -> float:
         '''Convert an array index to a physical coordinate.
@@ -258,8 +417,7 @@ class ScientificDataset:
         -------
         >>> coord = ds.index_to_coord("energy", 512)   # channel → eV
         '''
-        ax = self.get_axis(axis_name)
-        return ax.offset + index * ax.scale
+        return self.get_axis(axis_name).index_to_coord(index)
 
     # ------------------------------------------------------------------
     # Slicing by physical coordinates
@@ -289,21 +447,30 @@ class ScientificDataset:
         for i, ax in enumerate(self.axes):
             if ax.name in kwargs:
                 lo, hi = kwargs[ax.name]
-                i_lo = self.coord_to_index(ax.name, lo)
-                i_hi = self.coord_to_index(ax.name, hi) + 1
+                i_lo = ax.coord_to_index(lo)
+                i_hi = ax.coord_to_index(hi) + 1
                 slices.append(slice(i_lo, i_hi))
-                new_ax = Axis(
-                    name=ax.name,
-                    size=i_hi - i_lo,
-                    navigate=ax.navigate,
-                    scale=ax.scale,
-                    offset=ax.offset + i_lo * ax.scale,
-                    units=ax.units,
-                )
+                if ax._values is not None:
+                    new_ax = Axis.from_array(
+                        ax.name, ax._values[i_lo:i_hi],
+                        navigate=ax.navigate, units=ax.units,
+                    )
+                else:
+                    new_ax = Axis(
+                        name=ax.name, size=i_hi - i_lo,
+                        navigate=ax.navigate, scale=ax.scale,
+                        offset=ax.offset + i_lo * ax.scale,
+                        units=ax.units,
+                    )
             else:
                 slices.append(slice(None))
-                new_ax = Axis(ax.name, ax.size, ax.navigate,
-                              ax.scale, ax.offset, ax.units)
+                if ax._values is not None:
+                    new_ax = Axis.from_array(ax.name, ax._values,
+                                             navigate=ax.navigate,
+                                             units=ax.units)
+                else:
+                    new_ax = Axis(ax.name, ax.size, ax.navigate,
+                                  ax.scale, ax.offset, ax.units)
             new_axes.append(new_ax)
 
         return ScientificDataset(
@@ -321,16 +488,16 @@ class ScientificDataset:
                          rtol: float = 1e-3) -> bool:
         '''Return True if two datasets share the same navigation grid.
 
-        Checks that navigation axis names, sizes, scales, and offsets all
-        match within a relative tolerance.  Useful for verifying that an XRF
-        map and a DPC map were collected on the same scan grid before
-        overlaying them.
+        For uniform axes, compares scale and offset.  For irregular axes,
+        compares the full coordinate arrays element-wise.  Useful for
+        verifying that an XRF map and a DPC map were collected on the same
+        scan grid before overlaying or correlating them.
 
         Parameters
         ----------
         other : ScientificDataset
         rtol : float
-            Relative tolerance for scale/offset comparison.  Default 1e-3.
+            Relative tolerance for comparisons.  Default 1e-3.
         '''
         self_nav  = self.navigation_axes
         other_nav = other.navigation_axes
@@ -339,10 +506,15 @@ class ScientificDataset:
         for a, b in zip(self_nav, other_nav):
             if a.name != b.name or a.size != b.size:
                 return False
-            if not np.isclose(a.scale,  b.scale,  rtol=rtol):
-                return False
-            if not np.isclose(a.offset, b.offset, rtol=rtol):
-                return False
+            if a._values is not None or b._values is not None:
+                # compare full coordinate arrays
+                if not np.allclose(a.axis, b.axis, rtol=rtol):
+                    return False
+            else:
+                if not np.isclose(a.scale,  b.scale,  rtol=rtol):
+                    return False
+                if not np.isclose(a.offset, b.offset, rtol=rtol):
+                    return False
         return True
 
     # ------------------------------------------------------------------

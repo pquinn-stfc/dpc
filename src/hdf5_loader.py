@@ -495,13 +495,28 @@ def load_scientific(
                         if hasattr(main_data, "shape")
                         else int(main_data.shape[i]))
 
-            scale  = _resolve_axis_scalar(ax_raw.pop("scale",  1.0), f)
-            offset = _resolve_axis_scalar(ax_raw.pop("offset", 0.0), f)
-
-            axes.append(Axis(
-                name=name, size=size, navigate=navigate,
-                scale=scale, offset=offset, units=units,
-            ))
+            # 'values' key → explicit coordinate array (irregular axis)
+            values_spec = ax_raw.pop("values", None)
+            if values_spec is not None:
+                values_spec_obj = _parse_field_spec(values_spec)
+                # temporarily mark as keep_array so it comes back as ndarray
+                values_spec_obj.keep_array = True
+                coords = values_spec_obj.resolve(f)
+                if coords is None:
+                    raise KeyError(
+                        f"Axis {name!r}: 'values' path not found in file"
+                    )
+                axes.append(Axis.from_array(
+                    name=name, values=np.asarray(coords),
+                    navigate=navigate, units=units,
+                ))
+            else:
+                scale  = _resolve_axis_scalar(ax_raw.pop("scale",  1.0), f)
+                offset = _resolve_axis_scalar(ax_raw.pop("offset", 0.0), f)
+                axes.append(Axis(
+                    name=name, size=size, navigate=navigate,
+                    scale=scale, offset=offset, units=units,
+                ))
     finally:
         if not lazy:
             f.close()

@@ -298,12 +298,18 @@ def save_scientific(
         nxdata.attrs["axes"]     = [ax.name for ax in ds.axes]
 
         # write each axis as a dimension scale
+        # always write the full coordinate array (works for both uniform and
+        # irregular axes); for uniform axes also store scale/offset as attrs
         ax_datasets = []
         for ax in ds.axes:
-            ax_ds = nxdata.create_dataset(ax.name, data=ax.axis.astype(np.float32))
-            ax_ds.attrs["units"]     = ax.units
-            ax_ds.attrs["long_name"] = ax.name
-            ax_ds.attrs["navigate"]  = ax.navigate
+            ax_ds = nxdata.create_dataset(ax.name, data=ax.axis.astype(np.float64))
+            ax_ds.attrs["units"]      = ax.units
+            ax_ds.attrs["long_name"]  = ax.name
+            ax_ds.attrs["navigate"]   = ax.navigate
+            ax_ds.attrs["is_uniform"] = ax.is_uniform
+            if ax.is_uniform:
+                ax_ds.attrs["scale"]  = ax.scale
+                ax_ds.attrs["offset"] = ax.offset
             ax_ds.make_scale(ax.name)
             ax_datasets.append(ax_ds)
 
