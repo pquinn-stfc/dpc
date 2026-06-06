@@ -1,289 +1,98 @@
-'''Data schemas for scientific datasets.
+'''Data schemas.
 
-The core abstraction is :class:`ScientificDataset` — an N-dimensional array
-with labelled, calibrated axes and a ``signal_type`` string that describes
-the physical meaning of the data.  Navigation axes describe the scan/map
-dimensions; signal axes describe the detector or spectral dimension.
+The in-memory representation for NeXus data is :class:`NXData` — a thin
+container that mirrors a NeXus ``NXdata`` group: a primary data array, a
+list of axis coordinate arrays (each tagged as navigation or signal), a
+signal-type label, and arbitrary metadata.
 
-Signal dimensionality determines the "kind" of dataset:
+Utility functions for coordinate lookup, slicing, and grid comparison live
+in :mod:`nexus_loader` alongside the loader that produces ``NXData`` objects.
 
-=================  ==================  =============================
-signal_dimension   kind                Example
-=================  ==================  =============================
-0                  Scalar map          DPC phase, absorption map
-1                  Spectrum image      XRF, EELS, DPC-XANES
-2                  Image stack         Raw Merlin frames, ptychography
-=================  ==================  =============================
-
-A :class:`DPCDataset` is kept for backward compatibility but is now a
-thin wrapper that can convert itself to a :class:`ScientificDataset`.
+:class:`DPCDataset` is kept for instrument-specific loading; it can be
+converted to ``NXData`` via :meth:`DPCDataset.as_nxdata`.
 '''
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Axis
+# AxisInfo — one axis, as simple as possible
 # ---------------------------------------------------------------------------
 
-class Axis:
-    '''A single labelled, calibrated axis of a :class:`ScientificDataset`.
-
-    Supports two modes:
-
-    **Linear** (equally spaced) — described by ``offset`` and ``scale``::
-
-        coordinate[i] = offset + i * scale
-
-    **Arbitrary** — an explicit 1-D coordinate array stored in ``_values``.
-    Use :meth:`from_array` to construct this form.  Any scan with irregular
-    spacing (fly-scan, variable-step energy scan near an absorption edge,
-    encoder readback) should use the arbitrary form.
+class AxisInfo(NamedTuple):
+    '''Coordinate information for one dimension of an :class:`NXData` array.
 
     Parameters
     ----------
     name : str
-        Human-readable axis name, e.g. ``"scan_x"``, ``"energy"``.
-    size : int
-        Number of points along this axis.
+        Axis name, e.g. ``"scan_x"``, ``"energy"``.
+    values : ndarray, shape (N,)
+        Physical coordinate for each point along this dimension.
     navigate : bool
-        ``True`` for navigation (scan/map) axes; ``False`` for signal
-        (detector/spectrum) axes.
-    scale : float
-        Mean physical step size, in ``units``.  For a linear axis this is
-        the exact step; for an arbitrary axis it is computed from the
-        coordinate array on construction.  Default 1.
-    offset : float
-        Physical coordinate of the first point.  Default 0.
+        ``True`` for scan/map (navigation) dimensions; ``False`` for
+        detector/spectrum (signal) dimensions.
     units : str
-        Physical unit string, e.g. ``"m"``, ``"keV"``.
+        Physical unit string, e.g. ``"m"``, ``"eV"``.
     '''
-
-    def __init__(
-        self,
-        name: str,
-        size: int,
-        navigate: bool = False,
-        scale: float = 1.0,
-        offset: float = 0.0,
-        units: str = "",
-        _values: Optional[np.ndarray] = None,
-    ):
-        self.name     = name
-        self.size     = size
-        self.navigate = navigate
-        self.units    = units
-        self._values  = None
-
-        if _values is not None:
-            vals = np.asarray(_values, dtype=float)
-            if vals.ndim != 1 or len(vals) != size:
-                raise ValueError(
-                    f"Axis {name!r}: _values must be 1-D of length {size}, "
-                    f"got shape {vals.shape}."
-                )
-            self._values = vals
-            self.offset  = float(vals[0])
-            # mean step — used as a summary and as calX/calY for phase retrieval
-            self.scale   = float(np.diff(vals).mean()) if len(vals) > 1 else 1.0
-        else:
-            self.scale  = float(scale)
-            self.offset = float(offset)
-
-    # ------------------------------------------------------------------
-    # Alternate constructors
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def from_array(
-        cls,
-        name: str,
-        values: np.ndarray,
-        navigate: bool = False,
-        units: str = "",
-    ) -> "Axis":
-        '''Construct an axis from an explicit coordinate array.
-
-        Use this when positions are not equally spaced — e.g. a fly-scan
-        with encoder readback, or an energy axis with fine steps near an
-        absorption edge and coarse steps away from it.
-
-        Parameters
-        ----------
-        name : str
-        values : array-like, shape (N,)
-            Physical coordinates in ``units``, one per data point.
-        navigate : bool
-        units : str
-
-        Example
-        -------
-        ::
-
-            # Variable-step XANES energy axis
-            energy_eV = np.array([7090, 7100, 7105, 7108, 7110, 7112,
-                                   7115, 7120, 7130, 7150, 7200])
-            ax = Axis.from_array("energy", energy_eV, units="eV")
-        '''
-        values = np.asarray(values, dtype=float)
-        return cls(name=name, size=len(values), navigate=navigate,
-                   units=units, _values=values)
-
-    # ------------------------------------------------------------------
-    # Coordinate array
-    # ------------------------------------------------------------------
+    name: str
+    values: np.ndarray
+    navigate: bool = False
+    units: str = ""
 
     @property
-    def axis(self) -> np.ndarray:
-        '''1-D array of physical coordinates along this axis.
-
-        Returns the stored coordinate array for arbitrary axes, or a
-        linearly-spaced array for uniform axes.
-        '''
-        if self._values is not None:
-            return self._values
-        return self.offset + np.arange(self.size) * self.scale
-
-    # ------------------------------------------------------------------
-    # Uniformity
-    # ------------------------------------------------------------------
+    def size(self) -> int:
+        return len(self.values)
 
     @property
     def is_uniform(self) -> bool:
-        '''True if the axis is (or was defined as) equally spaced.
-
-        For axes constructed with :meth:`from_array`, checks whether all
-        steps are within 0.1 % of each other.
-        '''
-        if self._values is None:
+        '''True if all coordinate steps agree within 0.1 %.'''
+        if len(self.values) < 2:
             return True
-        steps = np.diff(self._values)
+        steps = np.diff(self.values)
         return bool(np.allclose(steps, steps[0], rtol=1e-3))
 
     @property
     def step_size(self) -> float:
-        '''Mean step size in physical units.
-
-        For uniform axes this is exact.  For irregular axes it is the mean
-        of all inter-point spacings — useful as ``calX``/``calY`` for phase
-        retrieval where a representative pixel size is needed.
-        '''
-        if self._values is not None:
-            return float(np.diff(self._values).mean())
-        return self.scale
-
-    # ------------------------------------------------------------------
-    # Coordinate lookup
-    # ------------------------------------------------------------------
-
-    def coord_to_index(self, coord: float) -> int:
-        '''Find the nearest array index for a physical coordinate.
-
-        Uses exact arithmetic for uniform axes and :func:`numpy.searchsorted`
-        for arbitrary axes.
-
-        Parameters
-        ----------
-        coord : float
-            Physical coordinate in the axis units.
-
-        Returns
-        -------
-        int
-            Nearest index, clamped to ``[0, size - 1]``.
-        '''
-        if self._values is not None:
-            # searchsorted then pick nearest neighbour
-            idx = int(np.searchsorted(self._values, coord))
-            if idx >= self.size:
-                return self.size - 1
-            if idx == 0:
-                return 0
-            # compare with left neighbour
-            if abs(self._values[idx - 1] - coord) < abs(self._values[idx] - coord):
-                return idx - 1
-            return idx
-        # Linear
-        idx = int(round((coord - self.offset) / self.scale))
-        return max(0, min(idx, self.size - 1))
-
-    def index_to_coord(self, index: int) -> float:
-        '''Physical coordinate for a given array index.'''
-        if self._values is not None:
-            return float(self._values[index])
-        return self.offset + index * self.scale
-
-    # ------------------------------------------------------------------
-    # Repr
-    # ------------------------------------------------------------------
+        '''Mean spacing between coordinate values.'''
+        if len(self.values) < 2:
+            return 1.0
+        return float(np.diff(self.values).mean())
 
     def __repr__(self) -> str:
         kind = "nav" if self.navigate else "sig"
-        if self._values is not None:
-            tag = f"irregular, mean_step={self.step_size:.3g}"
-        else:
-            tag = f"scale={self.scale:.3g}"
-        return f"Axis({self.name!r}, size={self.size}, {kind}, {tag}, units={self.units!r})"
+        tag  = f"uniform step={self.step_size:.3g}" if self.is_uniform \
+               else f"irregular mean_step={self.step_size:.3g}"
+        return f"AxisInfo({self.name!r}, size={self.size}, {kind}, {tag}, units={self.units!r})"
 
 
 # ---------------------------------------------------------------------------
-# ScientificDataset
+# NXData — in-memory NXdata group
 # ---------------------------------------------------------------------------
 
 @dataclass
-class ScientificDataset:
-    '''Generic N-dimensional scientific dataset with labelled axes.
+class NXData:
+    '''In-memory representation of a NeXus NXdata group.
 
-    The ``axes`` list must have the same length as ``data.ndim``.
-    By convention, navigation axes come first (lower indices) and signal
-    axes come last — matching the natural array layout::
-
-        data.shape = (*nav_shape, *signal_shape)
+    Mirrors the NeXus model directly: a primary ``data`` array, one
+    :class:`AxisInfo` per dimension, a ``signal_type`` label, and
+    free-form ``metadata``.
 
     Parameters
     ----------
     data : ndarray
-        The measurement data.
-    axes : list of Axis
-        One :class:`Axis` per dimension of ``data``.
+        The measurement array, shape ``(*nav_shape, *sig_shape)``.
+    axes : list of AxisInfo
+        One entry per dimension of ``data``, in array order.  Navigation
+        axes come first; signal axes come last.
     signal_type : str
-        Semantic label for the data kind, e.g. ``"XRF"``, ``"DPC"``,
-        ``"EELS"``, ``"ptychography"``.  No controlled vocabulary is
-        enforced — use whatever is meaningful to your analysis.
+        Free-form label: ``"DPC"``, ``"XRF"``, ``"EELS"``, etc.
     metadata : dict
-        Arbitrary key-value pairs (instrument settings, provenance, etc.).
-
-    Examples
-    --------
-    Build a spectrum-image (XRF map)::
-
-        ds = ScientificDataset(
-            data   = xrf_array,   # shape (scan_y, scan_x, n_channels)
-            axes   = [
-                Axis("scan_y",  size=scan_y,     navigate=True,  scale=50e-9, units="m"),
-                Axis("scan_x",  size=scan_x,     navigate=True,  scale=50e-9, units="m"),
-                Axis("energy",  size=n_channels, navigate=False, scale=10.0,  units="eV"),
-            ],
-            signal_type = "XRF",
-        )
-
-    Build a raw DPC image-stack::
-
-        ds = ScientificDataset(
-            data   = frames,      # shape (scan_y, scan_x, det_y, det_x)
-            axes   = [
-                Axis("scan_y", size=scan_y, navigate=True,  scale=50e-9, units="m"),
-                Axis("scan_x", size=scan_x, navigate=True,  scale=50e-9, units="m"),
-                Axis("det_y",  size=det_y,  navigate=False, scale=55e-6, units="m"),
-                Axis("det_x",  size=det_x,  navigate=False, scale=55e-6, units="m"),
-            ],
-            signal_type = "DPC",
-        )
+        Scalar fields from the NeXus file (instrument settings, etc.).
     '''
 
     data: np.ndarray
@@ -294,288 +103,42 @@ class ScientificDataset:
     def __post_init__(self):
         if len(self.axes) != self.data.ndim:
             raise ValueError(
-                f"Number of axes ({len(self.axes)}) must match data.ndim "
-                f"({self.data.ndim})."
+                f"len(axes)={len(self.axes)} must equal data.ndim={self.data.ndim}"
             )
-        # Validate that navigation axes precede signal axes
-        nav_done = False
-        for ax in reversed(self.axes):
-            if ax.navigate:
-                nav_done = True
-            elif nav_done:
-                raise ValueError(
-                    "Navigation axes must all precede signal axes. "
-                    "Got a signal axis after a navigation axis."
-                )
 
     # ------------------------------------------------------------------
-    # Axis views
+    # Axis access
     # ------------------------------------------------------------------
 
     @property
-    def navigation_axes(self) -> list:
-        '''Navigation axes in array order (outermost first).'''
+    def nav_axes(self) -> list:
+        '''Navigation axes in array order.'''
         return [ax for ax in self.axes if ax.navigate]
 
     @property
-    def signal_axes(self) -> list:
-        '''Signal axes in array order (innermost first for signal dims).'''
+    def sig_axes(self) -> list:
+        '''Signal axes in array order.'''
         return [ax for ax in self.axes if not ax.navigate]
 
     @property
-    def navigation_shape(self) -> tuple:
-        '''Shape of the navigation (scan) space.'''
-        return tuple(ax.size for ax in self.navigation_axes)
+    def nav_shape(self) -> tuple:
+        return tuple(ax.size for ax in self.nav_axes)
 
     @property
-    def signal_shape(self) -> tuple:
-        '''Shape of the signal (detector / spectral) space.'''
-        return tuple(ax.size for ax in self.signal_axes)
+    def sig_shape(self) -> tuple:
+        return tuple(ax.size for ax in self.sig_axes)
 
     @property
     def signal_dimension(self) -> int:
-        '''Number of signal axes (0 = scalar map, 1 = spectrum, 2 = image).'''
-        return len(self.signal_axes)
+        return len(self.sig_axes)
 
-    # ------------------------------------------------------------------
-    # Convenience predicates
-    # ------------------------------------------------------------------
-
-    @property
-    def is_scalar_map(self) -> bool:
-        '''True when every axis is a navigation axis (signal_dimension == 0).'''
-        return self.signal_dimension == 0
-
-    @property
-    def is_spectrum(self) -> bool:
-        '''True for spectrum-image datasets (signal_dimension == 1).'''
-        return self.signal_dimension == 1
-
-    @property
-    def is_image(self) -> bool:
-        '''True for image-stack datasets (signal_dimension == 2).'''
-        return self.signal_dimension == 2
-
-    # ------------------------------------------------------------------
-    # Axis lookup
-    # ------------------------------------------------------------------
-
-    def get_axis(self, name: str) -> "Axis":
-        '''Return the axis with the given name.
-
-        Raises
-        ------
-        KeyError
-            If no axis with that name exists.
-        '''
+    def get_axis(self, name: str) -> AxisInfo:
+        '''Return the AxisInfo with the given name.'''
         for ax in self.axes:
             if ax.name == name:
                 return ax
         raise KeyError(
-            f"No axis named {name!r}. Available: {[a.name for a in self.axes]}"
-        )
-
-    def axis_index(self, name: str) -> int:
-        '''Return the dimension index of the named axis.'''
-        for i, ax in enumerate(self.axes):
-            if ax.name == name:
-                return i
-        raise KeyError(name)
-
-    # ------------------------------------------------------------------
-    # Coordinate ↔ index conversion
-    # ------------------------------------------------------------------
-
-    def coord_to_index(self, axis_name: str, coord: float) -> int:
-        '''Convert a physical coordinate to the nearest array index.
-
-        Delegates to :meth:`Axis.coord_to_index`, which uses exact arithmetic
-        for uniform axes and nearest-neighbour search for irregular ones.
-
-        Parameters
-        ----------
-        axis_name : str
-            Name of the axis.
-        coord : float
-            Physical coordinate in the axis units.
-
-        Returns
-        -------
-        int
-            Nearest array index (clamped to valid range).
-
-        Example
-        -------
-        >>> idx = ds.coord_to_index("scan_x", 1.0e-6)   # 1 µm → pixel index
-        '''
-        return self.get_axis(axis_name).coord_to_index(coord)
-
-    def index_to_coord(self, axis_name: str, index: int) -> float:
-        '''Convert an array index to a physical coordinate.
-
-        Example
-        -------
-        >>> coord = ds.index_to_coord("energy", 512)   # channel → eV
-        '''
-        return self.get_axis(axis_name).index_to_coord(index)
-
-    # ------------------------------------------------------------------
-    # Slicing by physical coordinates
-    # ------------------------------------------------------------------
-
-    def slice_by_coords(self, **kwargs) -> "ScientificDataset":
-        '''Slice the dataset using physical coordinates.
-
-        Keyword arguments are ``axis_name=(lo, hi)`` pairs in the physical
-        units of that axis.  Only named axes are sliced; unspecified axes
-        are returned in full.
-
-        Returns a new :class:`ScientificDataset` with updated axes.
-
-        Example
-        -------
-        ::
-
-            # ROI from 0–500 nm in x and y
-            roi = ds.slice_by_coords(scan_x=(0, 500e-9), scan_y=(0, 500e-9))
-
-            # First 1 keV of an XRF spectrum
-            low_e = ds.slice_by_coords(energy=(0, 1000))
-        '''
-        slices = []
-        new_axes = []
-        for i, ax in enumerate(self.axes):
-            if ax.name in kwargs:
-                lo, hi = kwargs[ax.name]
-                i_lo = ax.coord_to_index(lo)
-                i_hi = ax.coord_to_index(hi) + 1
-                slices.append(slice(i_lo, i_hi))
-                if ax._values is not None:
-                    new_ax = Axis.from_array(
-                        ax.name, ax._values[i_lo:i_hi],
-                        navigate=ax.navigate, units=ax.units,
-                    )
-                else:
-                    new_ax = Axis(
-                        name=ax.name, size=i_hi - i_lo,
-                        navigate=ax.navigate, scale=ax.scale,
-                        offset=ax.offset + i_lo * ax.scale,
-                        units=ax.units,
-                    )
-            else:
-                slices.append(slice(None))
-                if ax._values is not None:
-                    new_ax = Axis.from_array(ax.name, ax._values,
-                                             navigate=ax.navigate,
-                                             units=ax.units)
-                else:
-                    new_ax = Axis(ax.name, ax.size, ax.navigate,
-                                  ax.scale, ax.offset, ax.units)
-            new_axes.append(new_ax)
-
-        return ScientificDataset(
-            data        = self.data[tuple(slices)],
-            axes        = new_axes,
-            signal_type = self.signal_type,
-            metadata    = self.metadata.copy(),
-        )
-
-    # ------------------------------------------------------------------
-    # Grid compatibility
-    # ------------------------------------------------------------------
-
-    def on_same_nav_grid(self, other: "ScientificDataset",
-                         rtol: float = 1e-3) -> bool:
-        '''Return True if two datasets share the same navigation grid.
-
-        For uniform axes, compares scale and offset.  For irregular axes,
-        compares the full coordinate arrays element-wise.  Useful for
-        verifying that an XRF map and a DPC map were collected on the same
-        scan grid before overlaying or correlating them.
-
-        Parameters
-        ----------
-        other : ScientificDataset
-        rtol : float
-            Relative tolerance for comparisons.  Default 1e-3.
-        '''
-        self_nav  = self.navigation_axes
-        other_nav = other.navigation_axes
-        if len(self_nav) != len(other_nav):
-            return False
-        for a, b in zip(self_nav, other_nav):
-            if a.name != b.name or a.size != b.size:
-                return False
-            if a._values is not None or b._values is not None:
-                # compare full coordinate arrays
-                if not np.allclose(a.axis, b.axis, rtol=rtol):
-                    return False
-            else:
-                if not np.isclose(a.scale,  b.scale,  rtol=rtol):
-                    return False
-                if not np.isclose(a.offset, b.offset, rtol=rtol):
-                    return False
-        return True
-
-    # ------------------------------------------------------------------
-    # Apply a function over every navigation position
-    # ------------------------------------------------------------------
-
-    def apply_nav(self, fn, dtype=None, signal_shape=None) -> "ScientificDataset":
-        '''Apply ``fn`` to the signal slice at every navigation position.
-
-        Returns a new :class:`ScientificDataset` whose data is the stacked
-        result.  The result dtype and signal shape are inferred from the
-        first evaluation unless supplied explicitly.
-
-        Parameters
-        ----------
-        fn : callable
-            ``fn(signal_slice: ndarray) -> ndarray or scalar``
-        dtype : numpy dtype, optional
-            Output array dtype.
-        signal_shape : tuple, optional
-            Shape of a single ``fn`` output.
-
-        Example
-        -------
-        ::
-
-            # sum each detector frame → scalar map
-            intensity = ds.apply_nav(lambda frame: frame.sum())
-
-            # centre-of-mass of each frame → (2,) result per position
-            com_map = ds.apply_nav(centre_of_mass, signal_shape=(2,))
-        '''
-        nav_shape = self.navigation_shape
-        flat_nav  = int(np.prod(nav_shape))
-
-        # infer output shape from first call
-        first = fn(self.data.reshape(flat_nav, *self.signal_shape)[0])
-        first = np.asarray(first)
-        if signal_shape is None:
-            signal_shape = first.shape
-        if dtype is None:
-            dtype = first.dtype
-
-        out = np.empty((*nav_shape, *signal_shape), dtype=dtype)
-        flat_data = self.data.reshape(flat_nav, *self.signal_shape)
-        flat_out  = out.reshape(flat_nav, *signal_shape)
-        for i in range(flat_nav):
-            flat_out[i] = fn(flat_data[i])
-
-        # new axes: same nav axes + new signal axes (unnamed, size from shape)
-        new_axes = [Axis(ax.name, ax.size, ax.navigate,
-                         ax.scale, ax.offset, ax.units)
-                    for ax in self.navigation_axes]
-        new_axes += [Axis(f"result_{i}", s, navigate=False)
-                     for i, s in enumerate(signal_shape)]
-
-        return ScientificDataset(
-            data        = out,
-            axes        = new_axes,
-            signal_type = self.signal_type,
-            metadata    = self.metadata.copy(),
+            f"No axis {name!r}. Available: {[a.name for a in self.axes]}"
         )
 
     # ------------------------------------------------------------------
@@ -583,97 +146,25 @@ class ScientificDataset:
     # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
-        nav = " × ".join(str(s) for s in self.navigation_shape) or "–"
-        sig = " × ".join(str(s) for s in self.signal_shape) or "–"
+        nav = " × ".join(str(ax.size) for ax in self.nav_axes) or "–"
+        sig = " × ".join(str(ax.size) for ax in self.sig_axes) or "–"
         kind = {0: "ScalarMap", 1: "SpectrumImage", 2: "ImageStack"}.get(
             self.signal_dimension, "Dataset"
         )
         label = f" [{self.signal_type}]" if self.signal_type else ""
-        return f"ScientificDataset{label} | {kind} | nav={nav} | sig={sig}"
-
-    # ------------------------------------------------------------------
-    # Conversion helpers
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def from_scalar_map(
-        cls,
-        data: np.ndarray,
-        nav_axes: list,
-        signal_type: str = "",
-        metadata: Optional[dict] = None,
-    ) -> "ScientificDataset":
-        '''Construct a scalar map — all axes are navigation axes.
-
-        Parameters
-        ----------
-        data : ndarray, shape (ny, nx[, ...])
-        nav_axes : list of Axis
-            All axes, each with ``navigate=True``.
-        '''
-        for ax in nav_axes:
-            ax.navigate = True
-        return cls(data=data, axes=nav_axes, signal_type=signal_type,
-                   metadata=metadata or {})
-
-    @classmethod
-    def from_spectrum_image(
-        cls,
-        data: np.ndarray,
-        nav_axes: list,
-        energy_axis: "Axis",
-        signal_type: str = "",
-        metadata: Optional[dict] = None,
-    ) -> "ScientificDataset":
-        '''Construct a spectrum-image (e.g. XRF, EELS).
-
-        Parameters
-        ----------
-        data : ndarray, shape (*nav_shape, n_channels)
-        nav_axes : list of Axis (navigate=True)
-        energy_axis : Axis (navigate=False)
-        '''
-        for ax in nav_axes:
-            ax.navigate = True
-        energy_axis.navigate = False
-        return cls(data=data, axes=[*nav_axes, energy_axis],
-                   signal_type=signal_type, metadata=metadata or {})
-
-    @classmethod
-    def from_image_stack(
-        cls,
-        data: np.ndarray,
-        nav_axes: list,
-        det_axes: list,
-        signal_type: str = "",
-        metadata: Optional[dict] = None,
-    ) -> "ScientificDataset":
-        '''Construct an image-stack (e.g. raw detector frames).
-
-        Parameters
-        ----------
-        data : ndarray, shape (*nav_shape, det_y, det_x)
-        nav_axes : list of Axis (navigate=True)
-        det_axes : list of Axis (navigate=False)
-        '''
-        for ax in nav_axes:
-            ax.navigate = True
-        for ax in det_axes:
-            ax.navigate = False
-        return cls(data=data, axes=[*nav_axes, *det_axes],
-                   signal_type=signal_type, metadata=metadata or {})
+        return f"NXData{label} | {kind} | nav={nav} | sig={sig}"
 
 
 # ---------------------------------------------------------------------------
-# DPCDataset — kept for backward compatibility
+# DPCDataset — instrument-specific, kept for backward compatibility
 # ---------------------------------------------------------------------------
 
 @dataclass
 class DPCDataset:
     '''Typed container for a loaded DPC scan.
 
-    Kept for backward compatibility.  For new code, prefer
-    :class:`ScientificDataset` with ``signal_type="DPC"``.
+    Kept for backward compatibility and instrument-specific loading.
+    Convert to :class:`NXData` via :meth:`as_nxdata` for generic processing.
     '''
 
     frames: np.ndarray
@@ -692,36 +183,32 @@ class DPCDataset:
 
     @property
     def com_scale(self) -> float:
-        '''Scale factor: CoM pixel shift → phase gradient (rad/m).
+        '''CoM pixel shift → phase gradient scale factor (rad/m).
 
-        Defined as 2π·pixel_size / (λ·detector_distance).
+        2π · pixel_size / (λ · detector_distance).
         '''
         return (2.0 * np.pi * self.pixel_size
                 / (self.wavelength * self.detector_distance / 1000.0))
 
-    def as_scientific(self) -> ScientificDataset:
-        '''Convert to a :class:`ScientificDataset` with fully labelled axes.
-
-        Returns a ``signal_type="DPC"`` image-stack where the navigation
-        axes carry the physical scan step sizes and the signal axes carry
-        the detector pixel size.
-        '''
+    def as_nxdata(self) -> NXData:
+        '''Convert to :class:`NXData` with calibrated axes.'''
         nr, nc = self.frames.shape[:2]
         det_shape = self.frames.shape[2:]
-        nav_axes = [
-            Axis("scan_y", size=nr, navigate=True,
-                 scale=self.scan_step_y, units="m"),
-            Axis("scan_x", size=nc, navigate=True,
-                 scale=self.scan_step_x, units="m"),
+
+        nav = [
+            AxisInfo("scan_y", np.arange(nr) * self.scan_step_y,
+                     navigate=True,  units="m"),
+            AxisInfo("scan_x", np.arange(nc) * self.scan_step_x,
+                     navigate=True,  units="m"),
         ]
-        det_axes = [
-            Axis(f"det_{i}", size=s, navigate=False,
-                 scale=self.pixel_size, units="m")
+        sig = [
+            AxisInfo(f"det_{i}", np.arange(s) * self.pixel_size,
+                     navigate=False, units="m")
             for i, s in enumerate(det_shape)
         ]
-        return ScientificDataset(
+        return NXData(
             data        = self.frames,
-            axes        = [*nav_axes, *det_axes],
+            axes        = [*nav, *sig],
             signal_type = "DPC",
             metadata    = {
                 "beam_energy":       self.beam_energy,

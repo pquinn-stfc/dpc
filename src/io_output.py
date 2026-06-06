@@ -247,25 +247,25 @@ def _normalise_u8(arr: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# ScientificDataset → HDF5
+# NXData → HDF5
 # ---------------------------------------------------------------------------
 
-def save_scientific(
+def save_nxdata(
     path: str | Path,
     ds,
     compression: str = "gzip",
 ):
-    '''Save a :class:`~io_schema.ScientificDataset` to a NeXus HDF5 file.
+    '''Save an :class:`~io_schema.NXData` to a NeXus HDF5 file.
 
     Axes are written as 1-D datasets and attached as HDF5 Dimension Scales
-    to the main data array so any NeXus-aware viewer (silx, h5web, NeXpy)
-    assigns correct physical axis labels automatically.
+    so any NeXus-aware viewer (silx, h5web, NeXpy) assigns correct physical
+    axis labels automatically.
 
     Parameters
     ----------
     path : path-like
         Output file path.
-    ds : ScientificDataset
+    ds : NXData
         Dataset to save.
     compression : str
         HDF5 compression filter.  Default ``'gzip'``.
@@ -275,7 +275,7 @@ def save_scientific(
     with h5py.File(path, "w") as f:
         entry = f.create_group("entry")
         entry.attrs["NX_class"] = "NXentry"
-        entry.create_dataset("definition",   data="NXscientific")
+        entry.create_dataset("definition",   data="NXdata")
         entry.create_dataset("program_name", data="dpc")
         entry.create_dataset("start_time",
                              data=datetime.now(timezone.utc).isoformat())
@@ -297,19 +297,17 @@ def save_scientific(
         nxdata.attrs["signal"]   = "data"
         nxdata.attrs["axes"]     = [ax.name for ax in ds.axes]
 
-        # write each axis as a dimension scale
-        # always write the full coordinate array (works for both uniform and
-        # irregular axes); for uniform axes also store scale/offset as attrs
+        # write each axis as a dimension scale (full coordinate array)
         ax_datasets = []
         for ax in ds.axes:
-            ax_ds = nxdata.create_dataset(ax.name, data=ax.axis.astype(np.float64))
+            ax_ds = nxdata.create_dataset(ax.name,
+                                          data=ax.values.astype(np.float64))
             ax_ds.attrs["units"]      = ax.units
             ax_ds.attrs["long_name"]  = ax.name
             ax_ds.attrs["navigate"]   = ax.navigate
             ax_ds.attrs["is_uniform"] = ax.is_uniform
             if ax.is_uniform:
-                ax_ds.attrs["scale"]  = ax.scale
-                ax_ds.attrs["offset"] = ax.offset
+                ax_ds.attrs["step_size"] = ax.step_size
             ax_ds.make_scale(ax.name)
             ax_datasets.append(ax_ds)
 
