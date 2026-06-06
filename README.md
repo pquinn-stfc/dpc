@@ -1,5 +1,7 @@
 # dpc
 
+[![License](https://img.shields.io/badge/License-BSD_2--Clause-blue.svg)](LICENSE)
+
 A Python package for extracting differential phase contrast (DPC) images from
 pixelated-detector data at scanning X-ray nanoprobe beamlines.
 

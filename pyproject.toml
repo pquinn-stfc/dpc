@@ -7,14 +7,14 @@ name = "dpc"
 version = "0.1.0"
 description = "Differential phase contrast imaging for scanning X-ray nanoprobe beamlines"
 readme = "README.md"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [
-    { name = "Paul Quinn", email = "paul.quinn@diamond.ac.uk" },
+    { name = "Paul Quinn", email = "paul.quinn@stfc.ac.uk" },
 ]
 keywords = ["DPC", "differential phase contrast", "X-ray", "phase retrieval", "synchrotron"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: BSD Software License",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Physics",
 ]
