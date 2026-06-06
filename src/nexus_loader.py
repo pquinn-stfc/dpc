@@ -115,6 +115,139 @@ class NeXusLoader:
             f.visititems(_collect_nxdata(f, results))
         return results
 
+    def load_from_yaml(
+        self,
+        yaml_path: str | Path,
+        overrides: Optional[dict] = None,
+    ) -> dict[str, ScientificDataset]:
+        '''Load a named selection of NXdata groups defined in a YAML file.
+
+        The YAML specifies which groups to load and optionally overrides
+        their signal type, navigate flags, or axis calibration.
+
+        YAML structure
+        --------------
+        Each top-level key becomes the label in the returned dict.  The value
+        is either a bare HDF5 path string or a dict with these optional keys:
+
+        ``path`` *(required)*
+            HDF5 path to the NXdata group.
+        ``signal_type`` *(optional)*
+            Override the signal type string from the file.
+        ``navigate`` *(optional)*
+            Dict of ``{axis_name: true|false}`` to override the navigate flag
+            for specific axes (useful when a file has no ``navigate`` attribute).
+        ``axis_units`` *(optional)*
+            Dict of ``{axis_name: unit_string}`` to override axis units.
+
+        Example YAML
+        ------------
+        ::
+
+            # Load two NXdata groups from a multi-modal scan
+            frames:
+              path: /entry/instrument/merlin/data
+              signal_type: DPC
+
+            xrf_iron:
+              path: /entry/xrf/Fe_Ka
+              signal_type: XRF
+              navigate:
+                scan_y: true
+                scan_x: true
+              axis_units:
+                energy: eV
+
+            absorption:
+              path: /entry/absorption/data
+              # signal_type taken from file
+
+        Parameters
+        ----------
+        yaml_path : path-like
+            Path to the YAML selection file.
+        overrides : dict, optional
+            Additional entries merged over the YAML (same format).
+            Useful for adding or replacing entries at call time.
+
+        Returns
+        -------
+        dict
+            ``{label: ScientificDataset}`` for each entry in the YAML.
+        '''
+        import yaml, io
+        if isinstance(yaml_path, (str, Path)):
+            with open(yaml_path) as f:
+                raw = yaml.safe_load(f) or {}
+        else:
+            # accept a file-like or StringIO directly
+            raw = yaml.safe_load(yaml_path) or {}
+        if overrides:
+            raw = {**raw, **overrides}
+
+        results: dict[str, ScientificDataset] = {}
+        with h5py.File(self.path, "r") as f:
+            for label, spec in raw.items():
+                # normalise to dict
+                if isinstance(spec, str):
+                    spec = {"path": spec}
+
+                hdf5_path   = spec.get("path")
+                signal_type = spec.get("signal_type")
+                nav_flags   = spec.get("navigate", {})
+                unit_flags  = spec.get("axis_units", {})
+
+                if hdf5_path is None:
+                    raise KeyError(
+                        f"Entry {label!r} in {yaml_path} has no 'path' key."
+                    )
+                if hdf5_path not in f:
+                    raise KeyError(
+                        f"HDF5 path {hdf5_path!r} not found in {self.path}. "
+                        f"Available NXdata groups: {self.list_nxdata()}"
+                    )
+
+                ds = _nxdata_to_dataset(f[hdf5_path])
+
+                # apply overrides
+                if signal_type is not None:
+                    ds = ScientificDataset(
+                        data=ds.data, axes=ds.axes,
+                        signal_type=signal_type,
+                        metadata=ds.metadata,
+                    )
+                if nav_flags or unit_flags:
+                    new_axes = []
+                    for ax in ds.axes:
+                        if nav_flags:
+                            # If any navigate flags are given, treat the dict
+                            # as exhaustive: axes not listed default to False
+                            # (signal), not to the heuristic value.
+                            navigate = nav_flags.get(ax.name, False)
+                        else:
+                            navigate = ax.navigate
+                        units = unit_flags.get(ax.name, ax.units)
+                        if ax._values is not None:
+                            new_ax = Axis.from_array(
+                                ax.name, ax._values,
+                                navigate=navigate, units=units,
+                            )
+                        else:
+                            new_ax = Axis(
+                                ax.name, ax.size, navigate=navigate,
+                                scale=ax.scale, offset=ax.offset, units=units,
+                            )
+                        new_axes.append(new_ax)
+                    ds = ScientificDataset(
+                        data=ds.data, axes=new_axes,
+                        signal_type=ds.signal_type,
+                        metadata=ds.metadata,
+                    )
+
+                results[label] = ds
+
+        return results
+
     def list_nxdata(self) -> list[str]:
         '''Return the HDF5 paths of all NXdata groups in the file.'''
         paths = []

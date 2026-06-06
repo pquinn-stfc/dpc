@@ -1,0 +1,28 @@
+# Select which NXdata groups to load from a Diamond I14 NeXus file.
+# Use with NeXusLoader.load_from_yaml().
+#
+# Each top-level key is the label used in the returned dict.
+# Value is either a bare HDF5 path or a dict with optional overrides.
+
+# Raw Merlin detector frames
+frames:
+  path: /entry/instrument/merlin/data
+  signal_type: DPC
+  navigate:
+    scan_y: true
+    scan_x: true
+
+# XRF iron K-alpha map
+xrf_fe:
+  path: /entry/xrf/Fe_Ka
+  signal_type: XRF
+  navigate:
+    scan_y: true
+    scan_x: true
+  axis_units:
+    energy: eV
+
+# DPC results written by save_scientific
+dpc_phase:
+  path: /entry/results
+  # signal_type and navigate taken from file attributes
