@@ -638,7 +638,10 @@ def phase_retrieval(dx, dy, calX=1.0, calY=1.0, method="kottler",
     kx_grid, ky_grid = np.meshgrid(kx, ky)
 
     if method == "kottler":
-        gxy = dx + 1j * dy
+        # dx, dy are in rad/m; kx_grid is in rad/scan-pixel.
+        # Multiply by scan step (m/pixel) to convert gradients to rad/pixel
+        # so numerator and denominator carry consistent units → phase in rad.
+        gxy = (dx * calX) + 1j * (dy * calY)
         numerator = np.fft.fftshift(np.fft.fft2(gxy))
         denominator = 2 * np.pi * 1j * (kx_grid + 1j * ky_grid)
     elif method == "arnison":

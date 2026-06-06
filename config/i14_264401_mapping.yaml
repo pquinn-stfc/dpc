@@ -11,7 +11,8 @@ beam_energy:
 
 # Detector distance not stored in file — typical I14 Merlin position
 detector_distance:
-  value: 2000.0           # mm
+  path: /entry/instrument/detectors/excalibur_z
+  # excalibur_z is in mm; DPCDataset.detector_distance expects mm (divides by 1000 internally)
 
 # Merlin pixel size 55 µm → metres
 pixel_size:
