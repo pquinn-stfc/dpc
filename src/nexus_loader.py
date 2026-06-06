@@ -85,7 +85,7 @@ class NeXusLoader:
         -------
         NXData
         '''
-        with h5py.File(self.path, "r") as f:
+        with h5py.File(self.path, "r", locking=False) as f:
             grp = f[path] if path is not None else _find_default_nxdata(f)
             if grp is None:
                 raise ValueError(
@@ -103,7 +103,7 @@ class NeXusLoader:
             ``{hdf5_path: NXData}`` for every NXdata group found.
         '''
         results: dict[str, NXData] = {}
-        with h5py.File(self.path, "r") as f:
+        with h5py.File(self.path, "r", locking=False) as f:
             f.visititems(_collect_nxdata(results))
         return results
 
@@ -161,7 +161,7 @@ class NeXusLoader:
             raw = {**raw, **overrides}
 
         results: dict[str, NXData] = {}
-        with h5py.File(self.path, "r") as f:
+        with h5py.File(self.path, "r", locking=False) as f:
             for label, spec in raw.items():
                 if isinstance(spec, str):
                     spec = {"path": spec}
@@ -203,14 +203,14 @@ class NeXusLoader:
     def list_nxdata(self) -> list[str]:
         '''Return the HDF5 paths of all NXdata groups in the file.'''
         paths: list[str] = []
-        with h5py.File(self.path, "r") as f:
+        with h5py.File(self.path, "r", locking=False) as f:
             f.visititems(lambda name, obj: _visit_nxdata(name, obj, paths))
         return paths
 
     def summary(self) -> str:
         '''Human-readable overview of all NXdata groups in the file.'''
         lines = [f"NeXus file: {self.path}"]
-        with h5py.File(self.path, "r") as f:
+        with h5py.File(self.path, "r", locking=False) as f:
             groups: list[str] = []
             f.visititems(lambda name, obj: _visit_nxdata(name, obj, groups))
             if not groups:

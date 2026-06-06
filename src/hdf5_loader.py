@@ -324,7 +324,9 @@ class HDF5Loader:
                                  for k, v in overrides.items()}}
 
         result: dict = {}
-        f = h5py.File(hdf5_path, "r")
+        # locking=False avoids advisory lock failures when the file is on a
+        # read-only bind-mount (e.g. inside a CWL/Docker container).
+        f = h5py.File(hdf5_path, "r", locking=False)
         try:
             for field_name, spec in specs.items():
                 if lazy and spec.keep_array and spec.path and spec.path in f:

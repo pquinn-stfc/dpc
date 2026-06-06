@@ -39,5 +39,6 @@ COPY config/ ./config/
 ENV PYTHONPATH="/app/src"
 
 # Default: print help.  Override via docker run or docker-compose command.
-ENTRYPOINT ["python", "main.py"]
-CMD ["--help"]
+# No ENTRYPOINT — lets cwltool supply the full command via baseCommand.
+# Direct docker run usage: docker run dpc python /app/main.py [args]
+CMD ["python", "/app/main.py", "--help"]

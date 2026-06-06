@@ -9,3 +9,6 @@ build/
 *.nxs
 *.h5
 *.npz
+
+# macOS
+.DS_Store

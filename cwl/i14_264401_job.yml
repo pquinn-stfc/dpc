@@ -1,0 +1,21 @@
+# CWL job input file for i14-264401.nxs
+# Run with:
+#   cwltool cwl/dpc_tool.cwl cwl/i14_264401_job.yml
+
+mapping_yaml:
+  class: File
+  path: /Users/paul.quinn/PycharmProjects/dpc/config/i14_264401_mapping.yaml
+
+nexus_file:
+  class: File
+  path: /Users/paul.quinn/Downloads/i14-264401.nxs
+  secondaryFiles:
+    - class: Directory
+      path: /Users/paul.quinn/Downloads/i14-264401
+
+method: kottler
+crop_size: 256
+format: [hdf5, png]
+full_mask: false
+no_phase: false
+debug: true

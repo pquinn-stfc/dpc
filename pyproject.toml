@@ -37,6 +37,9 @@ dev = [
 cwl = [
     "cwltool",
 ]
+toil = [
+    "toil[cwl]",
+]
 
 [project.scripts]
 dpc = "dpc.cli:main"
