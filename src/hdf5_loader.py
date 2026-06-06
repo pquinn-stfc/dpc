@@ -1,38 +1,54 @@
-'''Load DPC datasets from HDF5/NeXus files using a declarative field mapping.
+'''Generic HDF5/NeXus loader driven by a declarative field mapping.
 
-Each field in the mapping can be specified as:
+The loader is completely decoupled from any specific data schema.  It
+resolves a mapping into a plain ``dict`` of field names → values; a
+separate :func:`bind` helper populates any dataclass from that dict.
 
-1. A bare HDF5 path string — read directly::
+Quick start
+-----------
+::
 
-       beam_energy: /entry/instrument/monochromator/energy
+    from hdf5_loader import HDF5Loader, bind
+    from io_schema import DPCDataset
 
-2. A dict with any combination of ``path``, ``value``, ``default``,
-   ``scale``, and ``transform``::
+    loader = HDF5Loader("config/i14_mapping.yaml")
+    data   = loader.load("scan.nxs")          # plain dict
+    ds     = bind(data, DPCDataset)           # typed dataclass
 
-       # unit conversion via a named transform
-       detector_distance:
-         path: /entry/instrument/merlin/distance
-         transform: mm_to_m
+Or use the DPC-specific convenience function::
 
-       # raw value in microns, apply a scale factor
-       pixel_size:
-         path: /entry/instrument/merlin/pixel_size
-         scale: 1.0e-6
+    from hdf5_loader import load_dpc
+    ds = load_dpc("scan.nxs", "config/i14_mapping.yaml")
 
-       # hard-coded override — HDF5 file is not consulted
-       pixel_size:
-         value: 55.0e-6
+Field spec syntax
+-----------------
+Each entry in the mapping can be:
 
-       # path with a fallback if the key is absent in the file
-       scan_step_x:
-         path: /entry/scan/sample_x/step_size
-         default: 50.0e-9
+* A bare HDF5 path string::
 
-       # path + default in the raw unit + transform
-       scan_step_x:
-         path: /entry/scan/sample_x/step_size
-         default: 50.0
-         transform: nm_to_m
+      beam_energy: /entry/instrument/monochromator/energy
+
+* A dict with any combination of ``path``, ``value``, ``default``,
+  ``scale``, and ``transform``::
+
+      # unit conversion via a named transform
+      detector_distance:
+        path: /entry/instrument/merlin/distance
+        transform: mm_to_m
+
+      # hard-coded override — HDF5 file is not consulted
+      pixel_size:
+        value: 55.0e-6
+
+      # path with a fallback if the key is absent in the file
+      scan_step_x:
+        path: /entry/scan/sample_x/step_size
+        default: 50.0e-9
+
+      # infer step size from an array of equally-spaced positions
+      scan_step_x:
+        path: /entry/scan/sample_x/value
+        transform: step_from_positions_um
 
 Built-in named transforms
 -------------------------
@@ -43,143 +59,130 @@ Built-in named transforms
 ``deg_to_rad``, ``rad_to_deg``
     Angle conversions.
 ``step_from_positions``
-    Infer a scalar step size from a 1D array of equally-spaced positions by
-    computing ``np.diff(positions).mean()``.  The result is in the same units
-    as the stored positions.  Use the unit-aware variants to convert in one
-    step:
+    Reduce a 1D position array to its mean step size (native units).
+``step_from_positions_mm``, ``step_from_positions_um``, ``step_from_positions_nm``
+    As above, with built-in unit conversion to metres.
 
-    * ``step_from_positions_mm`` — positions in mm, result in m
-    * ``step_from_positions_um`` — positions in µm, result in m
-    * ``step_from_positions_nm`` — positions in nm, result in m
-
-    Example::
-
-        scan_step_x:
-          path: /entry/scan/sample_x/value
-          transform: step_from_positions_um
-
-Custom transforms can be registered at runtime via ``register_transform``.
+Custom transforms can be registered via :func:`register_transform`.
 '''
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import dataclasses
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Optional
+
 import h5py
 import numpy as np
 import yaml
-from pathlib import Path
 
-from io_schema import DPCDataset
 
 # ---------------------------------------------------------------------------
 # Named transform registry
 # ---------------------------------------------------------------------------
 
 _TRANSFORMS: dict[str, Callable] = {
-    # length → metres (scalar or array)
+    # length → metres
     "mm_to_m":  lambda x: np.asarray(x) * 1e-3,
     "um_to_m":  lambda x: np.asarray(x) * 1e-6,
     "nm_to_m":  lambda x: np.asarray(x) * 1e-9,
     "pm_to_m":  lambda x: np.asarray(x) * 1e-12,
     # energy
-    "ev_to_kev": lambda x: np.asarray(x) * 1e-3,
-    "kev_to_ev": lambda x: np.asarray(x) * 1e3,
+    "ev_to_kev":  lambda x: np.asarray(x) * 1e-3,
+    "kev_to_ev":  lambda x: np.asarray(x) * 1e3,
     # angle
     "deg_to_rad": lambda x: np.deg2rad(x),
     "rad_to_deg": lambda x: np.rad2deg(x),
-    # array → scalar: infer step size from a list of equally-spaced positions
-    "step_from_positions": lambda x: float(np.diff(np.asarray(x)).mean()),
-    "step_from_positions_mm": lambda x: float(np.diff(np.asarray(x)).mean()) * 1e-3,
-    "step_from_positions_um": lambda x: float(np.diff(np.asarray(x)).mean()) * 1e-6,
-    "step_from_positions_nm": lambda x: float(np.diff(np.asarray(x)).mean()) * 1e-9,
+    # array → scalar: infer step size from equally-spaced positions
+    "step_from_positions":     lambda x: float(np.diff(np.asarray(x)).mean()),
+    "step_from_positions_mm":  lambda x: float(np.diff(np.asarray(x)).mean()) * 1e-3,
+    "step_from_positions_um":  lambda x: float(np.diff(np.asarray(x)).mean()) * 1e-6,
+    "step_from_positions_nm":  lambda x: float(np.diff(np.asarray(x)).mean()) * 1e-9,
 }
 
 
-def register_transform(name: str, fn: Callable[[float], float]) -> None:
+def register_transform(name: str, fn: Callable) -> None:
     '''Register a named transform for use in YAML mapping files.
+
+    The function receives the raw value as a numpy array and must return
+    either a numpy array or a scalar.  Use a reducing transform (one that
+    collapses an array to a scalar) for fields that are stored as 1-D
+    position lists in the HDF5 file.
 
     Parameters
     ----------
     name : str
-        Name to use in the YAML ``transform`` key.
+        Key to use in the YAML ``transform`` field.
     fn : callable
-        Function that takes a single float and returns a float.
+        ``fn(np.ndarray) -> np.ndarray | float``
 
     Example
     -------
-    >>> register_transform("mrad_to_rad", lambda x: x * 1e-3)
+    >>> register_transform("mrad_to_rad", lambda x: np.asarray(x) * 1e-3)
     '''
     _TRANSFORMS[name] = fn
 
 
 # ---------------------------------------------------------------------------
-# FieldSpec — one entry in the mapping
+# FieldSpec
 # ---------------------------------------------------------------------------
 
 @dataclass
 class FieldSpec:
-    '''Specification for how to obtain a single dataset field.
+    '''Specification for how to obtain a single value from an HDF5 file.
 
     Parameters
     ----------
     path : str, optional
-        HDF5 dataset path inside the file.  If absent, ``value`` must be set.
+        HDF5 dataset path.  Omit when using ``value``.
     value : scalar, optional
-        Hard-coded override.  When set, the HDF5 file is not consulted for
-        this field and ``path`` / ``default`` are ignored.
+        Hard-coded override; the HDF5 file is not consulted for this field.
     default : scalar, optional
-        Fallback value used when ``path`` is given but the key is absent from
-        the file.  If neither the path nor a default is available the field is
-        omitted (and lands in ``DPCDataset.metadata`` if it is not a required
-        schema field).
+        Fallback used when ``path`` is given but absent from the file.
     scale : float, optional
-        Multiply the raw value by this factor after reading.  Applied before
-        ``transform``.  Default 1.0.
+        Multiply the value by this factor after reading and transforming.
+        Default 1.0.
     transform : str, optional
-        Name of a registered transform function to apply after ``scale``.
+        Name of a registered transform applied to the raw numpy array before
+        scaling.  May reduce an array to a scalar (e.g.
+        ``step_from_positions``).
+    keep_array : bool, optional
+        If True, skip the scalar-enforcement step and return the value as a
+        numpy array.  Use for fields such as ``frames`` that are inherently
+        multidimensional.  Default False.
     '''
     path: Optional[str] = None
     value: Optional[Any] = None
     default: Optional[Any] = None
     scale: float = 1.0
     transform: Optional[str] = None
+    keep_array: bool = False
 
-    def resolve(self, f: h5py.File) -> Optional[float]:
-        '''Read and process the field value from an open HDF5 file.
+    def resolve(self, f: h5py.File) -> Optional[Any]:
+        '''Resolve the field value from an open HDF5 file.
 
-        The resolution pipeline is:
+        Resolution pipeline:
 
-        1. Read the raw value as a numpy array (preserving shape).
-        2. Apply the named ``transform`` (which may reduce an array to a
-           scalar, e.g. ``step_from_positions``).
+        1. Read raw value as a numpy array (preserving shape).
+        2. Apply named ``transform`` (may reduce array → scalar).
         3. Multiply by ``scale``.
-        4. Cast to float.
-
-        This ordering means transforms that operate on arrays (such as
-        ``step_from_positions``) receive the full array before any scalar
-        conversion, while scalar unit-conversion transforms (``mm_to_m``,
-        etc.) still work identically to before.
-
-        Parameters
-        ----------
-        f : h5py.File
-            Open file handle.
+        4. Cast to float scalar (unless ``keep_array=True``).
 
         Returns
         -------
-        float or None
-            Resolved scalar value, or None if the field cannot be resolved.
+        float, ndarray, or None
+            None when the field cannot be resolved (absent path, no default).
 
         Raises
         ------
         KeyError
             If ``transform`` names an unregistered function.
         ValueError
-            If the value is still non-scalar after all transforms have been
-            applied.
+            If the resolved value is still non-scalar and ``keep_array`` is
+            False, guiding the caller to add a reducing transform.
         '''
-        # 1. Read raw value — keep as numpy array so array transforms work
+        # 1. Obtain raw numpy array
         if self.value is not None:
             raw = np.asarray(self.value)
         elif self.path is not None:
@@ -194,7 +197,7 @@ class FieldSpec:
         else:
             return None
 
-        # 2. Apply named transform (may reduce array → scalar)
+        # 2. Named transform
         if self.transform is not None:
             if self.transform not in _TRANSFORMS:
                 raise KeyError(
@@ -203,17 +206,24 @@ class FieldSpec:
                 )
             raw = np.asarray(_TRANSFORMS[self.transform](raw))
 
-        # 3. Scale
-        result = raw * self.scale
+        # 3. Scale (only for numeric types)
+        if np.issubdtype(raw.dtype, np.number):
+            result = raw * self.scale
+        else:
+            result = raw
 
-        # 4. Cast to scalar float — error early if still an array
+        # 4. Return
+        if self.keep_array:
+            return result
+
         if result.ndim != 0:
             raise ValueError(
-                f"Field resolved to a non-scalar array of shape {result.shape}. "
-                f"Use a transform such as 'step_from_positions' to reduce it "
-                f"to a scalar before loading."
+                f"Field at path {self.path!r} resolved to a non-scalar array "
+                f"of shape {result.shape}. Add a reducing transform such as "
+                f"'step_from_positions', or set keep_array=true in the mapping."
             )
-        return float(result)
+        # return native Python scalar
+        return result.item()
 
 
 def _parse_field_spec(raw) -> FieldSpec:
@@ -234,123 +244,184 @@ def _parse_field_spec(raw) -> FieldSpec:
 
 
 # ---------------------------------------------------------------------------
-# Schema field set
+# HDF5Loader — generic, schema-agnostic
 # ---------------------------------------------------------------------------
 
-_SCHEMA_FIELDS = {
-    f for f in DPCDataset.__dataclass_fields__
-    if f not in ("frames", "metadata")
-}
+class HDF5Loader:
+    '''Generic HDF5/NeXus loader driven by a declarative field mapping.
 
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def load_mapping(mapping_path: str | Path) -> dict:
-    '''Load a YAML field-mapping file.
+    The loader knows nothing about any particular data schema.  It resolves
+    each field spec and returns a plain ``dict``.  Use :func:`bind` to
+    populate a typed dataclass from that dict.
 
     Parameters
     ----------
-    mapping_path : path-like
-        Path to a YAML mapping file.
+    mapping : dict or path-like
+        Field mapping as a dict or path to a YAML file.
+    overrides : dict, optional
+        Additional field specs merged on top of ``mapping``.  Useful for
+        runtime overrides without editing the YAML file.
+
+    Examples
+    --------
+    Load into a plain dict::
+
+        loader = HDF5Loader("config/i14_mapping.yaml")
+        data = loader.load("scan.nxs")
+
+    Load into a typed dataclass::
+
+        from io_schema import DPCDataset
+        ds = bind(loader.load("scan.nxs"), DPCDataset)
+
+    Runtime override::
+
+        data = loader.load("scan.nxs",
+                           overrides={"pixel_size": {"value": 110e-6}})
+    '''
+
+    def __init__(
+        self,
+        mapping: dict | str | Path,
+        overrides: Optional[dict] = None,
+    ):
+        raw = mapping if isinstance(mapping, dict) else _load_yaml(mapping)
+        if overrides:
+            raw = {**raw, **overrides}
+        self._specs: dict[str, FieldSpec] = {
+            k: _parse_field_spec(v) for k, v in raw.items()
+        }
+
+    def load(
+        self,
+        hdf5_path: str | Path,
+        lazy: bool = False,
+        overrides: Optional[dict] = None,
+    ) -> dict:
+        '''Load fields from an HDF5 file into a plain dict.
+
+        Parameters
+        ----------
+        hdf5_path : path-like
+            Path to the HDF5 or NeXus file.
+        lazy : bool, optional
+            When True, array fields with ``keep_array=True`` are returned as
+            live ``h5py.Dataset`` objects rather than numpy arrays.  The
+            caller is responsible for keeping the file open.  Default False.
+        overrides : dict, optional
+            Per-call field overrides (same format as the mapping).
+
+        Returns
+        -------
+        dict
+            ``{field_name: resolved_value}`` for every field that could be
+            resolved.  Fields that cannot be resolved (no path, no default,
+            no value) are silently omitted.
+        '''
+        specs = self._specs
+        if overrides:
+            specs = {**specs, **{k: _parse_field_spec(v)
+                                 for k, v in overrides.items()}}
+
+        result: dict = {}
+        f = h5py.File(hdf5_path, "r")
+        try:
+            for field_name, spec in specs.items():
+                if lazy and spec.keep_array and spec.path and spec.path in f:
+                    result[field_name] = f[spec.path]
+                else:
+                    resolved = spec.resolve(f)
+                    if resolved is not None:
+                        result[field_name] = resolved
+        finally:
+            if not lazy:
+                f.close()
+
+        return result
+
+
+# ---------------------------------------------------------------------------
+# bind — attach a plain dict to any dataclass
+# ---------------------------------------------------------------------------
+
+def bind(data: dict, schema) -> Any:
+    '''Populate a dataclass from a plain dict.
+
+    Fields present in ``data`` that match a constructor parameter of
+    ``schema`` are passed directly.  Any remaining fields are collected into
+    ``schema.metadata`` if that field exists, otherwise they are silently
+    dropped.
+
+    Parameters
+    ----------
+    data : dict
+        Field dict as returned by :meth:`HDF5Loader.load`.
+    schema : dataclass type
+        Target dataclass.
 
     Returns
     -------
-    dict
-        Raw mapping dict (values not yet parsed into ``FieldSpec`` objects).
+    An instance of ``schema``.
+
+    Example
+    -------
+    ::
+
+        from io_schema import DPCDataset
+        ds = bind(loader.load("scan.nxs"), DPCDataset)
     '''
-    with open(mapping_path) as f:
+    schema_fields = {f.name for f in dataclasses.fields(schema)}
+    kwargs  = {k: v for k, v in data.items() if k in schema_fields
+                                              and k != "metadata"}
+    extra   = {k: v for k, v in data.items() if k not in schema_fields}
+
+    if "metadata" in schema_fields:
+        kwargs["metadata"] = extra
+
+    return schema(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _load_yaml(path: str | Path) -> dict:
+    with open(path) as f:
         return yaml.safe_load(f)
 
+
+# ---------------------------------------------------------------------------
+# DPC-specific convenience wrapper
+# ---------------------------------------------------------------------------
 
 def load_dpc(
     hdf5_path: str | Path,
     mapping: dict | str | Path,
     lazy: bool = False,
     overrides: Optional[dict] = None,
-) -> DPCDataset:
+):
     '''Load a DPC dataset from an HDF5/NeXus file.
+
+    Convenience wrapper around :class:`HDF5Loader` and :func:`bind` that
+    returns a :class:`~io_schema.DPCDataset`.
 
     Parameters
     ----------
     hdf5_path : path-like
         Path to the HDF5 or NeXus file.
     mapping : dict or path-like
-        Field mapping as a dict or path to a YAML file.  Each value may be:
-
-        * a bare HDF5 path string
-        * a dict with keys ``path``, ``value``, ``default``, ``scale``,
-          ``transform`` (all optional, see module docstring for details)
-
+        Field mapping (dict or path to YAML).
     lazy : bool, optional
-        If True, ``frames`` is returned as a live ``h5py.Dataset`` and the
-        file is left open.  The caller is responsible for closing it.
-        Default False.
+        Return ``frames`` as a live ``h5py.Dataset``.  Default False.
     overrides : dict, optional
-        Additional field specs (same format as ``mapping``) merged on top of
-        the mapping *after* loading.  Useful for setting or overriding values
-        at call time without editing the YAML file, e.g.::
-
-            load_dpc(path, mapping, overrides={"pixel_size": {"value": 55e-6}})
+        Per-call field overrides.
 
     Returns
     -------
     DPCDataset
-
-    Raises
-    ------
-    KeyError
-        If no ``frames`` entry is found or resolved.
     '''
-    if not isinstance(mapping, dict):
-        mapping = load_mapping(mapping)
+    from io_schema import DPCDataset
 
-    # Merge overrides on top of mapping
-    if overrides:
-        mapping = {**mapping, **overrides}
-
-    # Parse every entry into a FieldSpec
-    specs: dict[str, FieldSpec] = {}
-    frames_spec: Optional[FieldSpec] = None
-    for field_name, raw in mapping.items():
-        spec = _parse_field_spec(raw)
-        if field_name == "frames":
-            frames_spec = spec
-        else:
-            specs[field_name] = spec
-
-    if frames_spec is None:
-        raise KeyError("mapping must contain a 'frames' entry")
-
-    scalar_kwargs: dict = {}
-    extra: dict = {}
-    frames = None
-
-    f = h5py.File(hdf5_path, "r")
-    try:
-        # Frames — always read as array or lazy dataset
-        if frames_spec.value is not None:
-            raise ValueError("'frames' cannot use a hard-coded value override")
-        if frames_spec.path is None or frames_spec.path not in f:
-            raise KeyError(
-                f"'frames' path {frames_spec.path!r} not found in {hdf5_path}"
-            )
-        frames = f[frames_spec.path] if lazy else f[frames_spec.path][()]
-
-        # Scalar fields
-        for field_name, spec in specs.items():
-            resolved = spec.resolve(f)
-            if resolved is None:
-                # field absent and no default — skip silently
-                continue
-            if field_name in _SCHEMA_FIELDS:
-                scalar_kwargs[field_name] = resolved
-            else:
-                extra[field_name] = resolved
-
-    finally:
-        if not lazy:
-            f.close()
-
-    return DPCDataset(frames=frames, **scalar_kwargs, metadata=extra)
+    loader = HDF5Loader(mapping, overrides=overrides)
+    data   = loader.load(hdf5_path, lazy=lazy)
+    return bind(data, DPCDataset)

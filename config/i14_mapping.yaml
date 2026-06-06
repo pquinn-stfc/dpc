@@ -14,6 +14,7 @@
 
 frames:
   path: /entry/instrument/merlin/data
+  keep_array: true
 
 beam_energy:
   path: /entry/instrument/monochromator/energy   # keV — already correct unit
