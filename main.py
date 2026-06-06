@@ -71,29 +71,33 @@ def run(args):
     from outlier_removal_tools import median_subtraction
 
     # ------------------------------------------------------------------
-    # 1. Load dataset
+    # 1. Load dataset (lazy — frames stay on disk until indexed)
     # ------------------------------------------------------------------
     print(f'Loading {args.nexus_file} ...')
-    ds = load_dpc(args.nexus_file, args.mapping_yaml)
-    frames = ds.frames                  # (scan_y, scan_x, det_y, det_x)
-    print(f'  frames shape : {frames.shape}')
+    import h5py
+    ds = load_dpc(args.nexus_file, args.mapping_yaml, lazy=True)
+    frames = ds.frames                  # h5py.Dataset — not yet in RAM
+    scan_shape = frames.shape[:2]
+    det_shape  = frames.shape[2:]
+    frame_bytes = int(np.prod(det_shape)) * frames.dtype.itemsize
+    total_gb    = frames.size * frames.dtype.itemsize / 1024**3
+    print(f'  frames shape : {frames.shape}  ({total_gb:.2f} GB total, '
+          f'{frame_bytes/1024:.0f} KB/frame — lazy)')
     print(f'  beam energy  : {ds.beam_energy:.3f} keV')
     print(f'  wavelength   : {ds.wavelength * 1e10:.4f} Å')
     print(f'  det distance : {ds.detector_distance:.1f} mm')
     print(f'  CoM scale    : {ds.com_scale:.4f} rad/pixel')
 
-    scan_shape = frames.shape[:2]
-    det_shape  = frames.shape[2:]
-
     # ------------------------------------------------------------------
     # 2. Build pixel mask from a representative frame
     # ------------------------------------------------------------------
     print('Building pixel mask ...')
-    sample_frame = frames[0, 0].astype(float)
+    sample_frame = frames[0, 0].astype(float)   # reads one frame
 
     stack = None
     if args.full_mask:
-        stack = frames.reshape(-1, *det_shape).astype(float)
+        print('  Reading all frames for full masking ...')
+        stack = frames[()].reshape(-1, *det_shape).astype(float)
 
     pixel_mask, filtered_for_beam = build_pixel_mask(
         sample_frame,
@@ -125,14 +129,18 @@ def run(args):
     # 4. Centre-of-mass map
     # ------------------------------------------------------------------
     print('Computing centre-of-mass map ...')
-    label = (~com_mask).astype(int)
-
+    label   = (~com_mask).astype(int)
     com_map = np.zeros((*scan_shape, 2))
-    flat_frames = frames.reshape(-1, *det_shape)
-    for idx in range(flat_frames.shape[0]):
-        com_map.reshape(-1, 2)[idx] = centre_of_mass(
-            flat_frames[idx].astype(float), labelled_region=label
-        )
+    n_total = scan_shape[0] * scan_shape[1]
+    for i in range(scan_shape[0]):
+        for j in range(scan_shape[1]):
+            idx = i * scan_shape[1] + j
+            if idx % max(1, n_total // 10) == 0:
+                print(f'  {idx}/{n_total} frames', end='\r', flush=True)
+            com_map[i, j] = centre_of_mass(
+                frames[i, j].astype(float), labelled_region=label
+            )
+    print(f'  {n_total}/{n_total} frames')
 
     # Remove mean offset and apply quantitative scale
     com_map[..., 0] -= com_map[..., 0].mean()
