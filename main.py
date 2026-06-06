@@ -186,6 +186,10 @@ def run(args):
         dx=dx, dy=dy, grad_norm=grad_norm,
         phase=phase, pixel_mask=pixel_mask,
     )
+    image_common = dict(
+        dx=dx, dy=dy, grad_norm=grad_norm,
+        phase=phase,
+    )
 
     if 'hdf5' in formats:
         out = base.with_suffix('.nxs')
@@ -206,7 +210,7 @@ def run(args):
     for fmt in ('png', 'tif'):
         if fmt in formats:
             print(f'Saving {fmt.upper()} images → {base}_*.{fmt}')
-            saved = save_images(base, fmt, **common)
+            saved = save_images(base, fmt, **image_common)
             for p_ in saved:
                 print(f'  {p_}')
 

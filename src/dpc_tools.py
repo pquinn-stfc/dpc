@@ -157,43 +157,11 @@ def centre_of_mass(img, labelled_region=None):
         properties = regionprops(labelled_region, intensity_image=img)
         prop = properties[0]
 
-        w_com = np.asarray(prop.weighted_centroid)
+        # centroid_weighted replaces weighted_centroid in scikit-image >= 0.26
+        attr = 'centroid_weighted' if hasattr(prop, 'centroid_weighted') \
+               else 'weighted_centroid'
+        w_com = np.asarray(getattr(prop, attr))
 
         return w_com
     except:
         return np.array([0.0,0.0])
-
-#def replace_invalid_pixels(data, tolerance=10, size=2, sure_dead=None):
-#
-#    # for the main image
-#    blurred = median_filter(data, size=size)
-#    threshold = tolerance * np.std(blurred)
-##    print('The threshold is at {:.4f}'.format(threshold))
-#
-#    # handle edge
-#    edge_filter_size = size + 1
-#    cut = size // 2
-#    left = generic_filter(data[:,:size], np.nanmedian, size=edge_filter_size,
-#                          mode='constant', cval=np.nan)[:,:cut]
-#    right = generic_filter(data[:,-size:], np.nanmedian, size=edge_filter_size,
-#                          mode='constant', cval=np.nan)[:,-cut:]
-#    bottom = generic_filter(data[:size,:], np.nanmedian, size=edge_filter_size,
-#                          mode='constant', cval=np.nan)[:cut, :]
-#    top = generic_filter(data[-size:,:], np.nanmedian, size=edge_filter_size,
-#                          mode='constant', cval=np.nan)[-cut:, :]
-#    blurred[:,:cut] = left
-#    blurred[:,-cut:] = right
-#    blurred[:cut, :] = bottom
-#    blurred[-cut:,:] = top
-#
-#    # determine the positions of invalid pixels
-#    difference = np.abs(data - blurred)
-#    invalid = difference > threshold
-#    if sure_dead is not None:
-#        invalid = invalid | sure_dead
-#
-#    # replace invalid pixels with filtered/median value
-#    img = data.copy()
-#    img[invalid] = blurred[invalid]
-#
-#    return img, invalid
