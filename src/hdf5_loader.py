@@ -42,6 +42,21 @@ Built-in named transforms
     Energy unit conversions.
 ``deg_to_rad``, ``rad_to_deg``
     Angle conversions.
+``step_from_positions``
+    Infer a scalar step size from a 1D array of equally-spaced positions by
+    computing ``np.diff(positions).mean()``.  The result is in the same units
+    as the stored positions.  Use the unit-aware variants to convert in one
+    step:
+
+    * ``step_from_positions_mm`` — positions in mm, result in m
+    * ``step_from_positions_um`` — positions in µm, result in m
+    * ``step_from_positions_nm`` — positions in nm, result in m
+
+    Example::
+
+        scan_step_x:
+          path: /entry/scan/sample_x/value
+          transform: step_from_positions_um
 
 Custom transforms can be registered at runtime via ``register_transform``.
 '''
@@ -61,18 +76,23 @@ from io_schema import DPCDataset
 # Named transform registry
 # ---------------------------------------------------------------------------
 
-_TRANSFORMS: dict[str, Callable[[float], float]] = {
-    # length → metres
-    "mm_to_m":  lambda x: x * 1e-3,
-    "um_to_m":  lambda x: x * 1e-6,
-    "nm_to_m":  lambda x: x * 1e-9,
-    "pm_to_m":  lambda x: x * 1e-12,
+_TRANSFORMS: dict[str, Callable] = {
+    # length → metres (scalar or array)
+    "mm_to_m":  lambda x: np.asarray(x) * 1e-3,
+    "um_to_m":  lambda x: np.asarray(x) * 1e-6,
+    "nm_to_m":  lambda x: np.asarray(x) * 1e-9,
+    "pm_to_m":  lambda x: np.asarray(x) * 1e-12,
     # energy
-    "ev_to_kev": lambda x: x * 1e-3,
-    "kev_to_ev": lambda x: x * 1e3,
+    "ev_to_kev": lambda x: np.asarray(x) * 1e-3,
+    "kev_to_ev": lambda x: np.asarray(x) * 1e3,
     # angle
     "deg_to_rad": lambda x: np.deg2rad(x),
     "rad_to_deg": lambda x: np.rad2deg(x),
+    # array → scalar: infer step size from a list of equally-spaced positions
+    "step_from_positions": lambda x: float(np.diff(np.asarray(x)).mean()),
+    "step_from_positions_mm": lambda x: float(np.diff(np.asarray(x)).mean()) * 1e-3,
+    "step_from_positions_um": lambda x: float(np.diff(np.asarray(x)).mean()) * 1e-6,
+    "step_from_positions_nm": lambda x: float(np.diff(np.asarray(x)).mean()) * 1e-9,
 }
 
 
@@ -128,6 +148,19 @@ class FieldSpec:
     def resolve(self, f: h5py.File) -> Optional[float]:
         '''Read and process the field value from an open HDF5 file.
 
+        The resolution pipeline is:
+
+        1. Read the raw value as a numpy array (preserving shape).
+        2. Apply the named ``transform`` (which may reduce an array to a
+           scalar, e.g. ``step_from_positions``).
+        3. Multiply by ``scale``.
+        4. Cast to float.
+
+        This ordering means transforms that operate on arrays (such as
+        ``step_from_positions``) receive the full array before any scalar
+        conversion, while scalar unit-conversion transforms (``mm_to_m``,
+        etc.) still work identically to before.
+
         Parameters
         ----------
         f : h5py.File
@@ -142,33 +175,45 @@ class FieldSpec:
         ------
         KeyError
             If ``transform`` names an unregistered function.
+        ValueError
+            If the value is still non-scalar after all transforms have been
+            applied.
         '''
-        # Hard-coded override — never touch the file
+        # 1. Read raw value — keep as numpy array so array transforms work
         if self.value is not None:
-            raw = float(self.value)
+            raw = np.asarray(self.value)
         elif self.path is not None:
             if self.path in f:
-                raw = float(np.asarray(f[self.path]))
+                raw = np.asarray(f[self.path])
             elif self.default is not None:
-                raw = float(self.default)
+                raw = np.asarray(self.default)
             else:
                 return None
         elif self.default is not None:
-            raw = float(self.default)
+            raw = np.asarray(self.default)
         else:
             return None
 
-        # Apply scale then named transform
-        result = raw * self.scale
+        # 2. Apply named transform (may reduce array → scalar)
         if self.transform is not None:
             if self.transform not in _TRANSFORMS:
                 raise KeyError(
                     f"Unknown transform {self.transform!r}. "
                     f"Available: {sorted(_TRANSFORMS)}"
                 )
-            result = _TRANSFORMS[self.transform](result)
+            raw = np.asarray(_TRANSFORMS[self.transform](raw))
 
-        return result
+        # 3. Scale
+        result = raw * self.scale
+
+        # 4. Cast to scalar float — error early if still an array
+        if result.ndim != 0:
+            raise ValueError(
+                f"Field resolved to a non-scalar array of shape {result.shape}. "
+                f"Use a transform such as 'step_from_positions' to reduce it "
+                f"to a scalar before loading."
+            )
+        return float(result)
 
 
 def _parse_field_spec(raw) -> FieldSpec:
