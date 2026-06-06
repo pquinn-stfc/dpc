@@ -199,6 +199,214 @@ class ScientificDataset:
         return self.signal_dimension == 2
 
     # ------------------------------------------------------------------
+    # Axis lookup
+    # ------------------------------------------------------------------
+
+    def get_axis(self, name: str) -> "Axis":
+        '''Return the axis with the given name.
+
+        Raises
+        ------
+        KeyError
+            If no axis with that name exists.
+        '''
+        for ax in self.axes:
+            if ax.name == name:
+                return ax
+        raise KeyError(
+            f"No axis named {name!r}. Available: {[a.name for a in self.axes]}"
+        )
+
+    def axis_index(self, name: str) -> int:
+        '''Return the dimension index of the named axis.'''
+        for i, ax in enumerate(self.axes):
+            if ax.name == name:
+                return i
+        raise KeyError(name)
+
+    # ------------------------------------------------------------------
+    # Coordinate ↔ index conversion
+    # ------------------------------------------------------------------
+
+    def coord_to_index(self, axis_name: str, coord: float) -> int:
+        '''Convert a physical coordinate to the nearest array index.
+
+        Parameters
+        ----------
+        axis_name : str
+            Name of the axis.
+        coord : float
+            Physical coordinate in the axis units.
+
+        Returns
+        -------
+        int
+            Nearest array index (clamped to valid range).
+
+        Example
+        -------
+        >>> idx = ds.coord_to_index("scan_x", 1.0e-6)   # 1 µm → pixel index
+        '''
+        ax = self.get_axis(axis_name)
+        idx = int(round((coord - ax.offset) / ax.scale))
+        return max(0, min(idx, ax.size - 1))
+
+    def index_to_coord(self, axis_name: str, index: int) -> float:
+        '''Convert an array index to a physical coordinate.
+
+        Example
+        -------
+        >>> coord = ds.index_to_coord("energy", 512)   # channel → eV
+        '''
+        ax = self.get_axis(axis_name)
+        return ax.offset + index * ax.scale
+
+    # ------------------------------------------------------------------
+    # Slicing by physical coordinates
+    # ------------------------------------------------------------------
+
+    def slice_by_coords(self, **kwargs) -> "ScientificDataset":
+        '''Slice the dataset using physical coordinates.
+
+        Keyword arguments are ``axis_name=(lo, hi)`` pairs in the physical
+        units of that axis.  Only named axes are sliced; unspecified axes
+        are returned in full.
+
+        Returns a new :class:`ScientificDataset` with updated axes.
+
+        Example
+        -------
+        ::
+
+            # ROI from 0–500 nm in x and y
+            roi = ds.slice_by_coords(scan_x=(0, 500e-9), scan_y=(0, 500e-9))
+
+            # First 1 keV of an XRF spectrum
+            low_e = ds.slice_by_coords(energy=(0, 1000))
+        '''
+        slices = []
+        new_axes = []
+        for i, ax in enumerate(self.axes):
+            if ax.name in kwargs:
+                lo, hi = kwargs[ax.name]
+                i_lo = self.coord_to_index(ax.name, lo)
+                i_hi = self.coord_to_index(ax.name, hi) + 1
+                slices.append(slice(i_lo, i_hi))
+                new_ax = Axis(
+                    name=ax.name,
+                    size=i_hi - i_lo,
+                    navigate=ax.navigate,
+                    scale=ax.scale,
+                    offset=ax.offset + i_lo * ax.scale,
+                    units=ax.units,
+                )
+            else:
+                slices.append(slice(None))
+                new_ax = Axis(ax.name, ax.size, ax.navigate,
+                              ax.scale, ax.offset, ax.units)
+            new_axes.append(new_ax)
+
+        return ScientificDataset(
+            data        = self.data[tuple(slices)],
+            axes        = new_axes,
+            signal_type = self.signal_type,
+            metadata    = self.metadata.copy(),
+        )
+
+    # ------------------------------------------------------------------
+    # Grid compatibility
+    # ------------------------------------------------------------------
+
+    def on_same_nav_grid(self, other: "ScientificDataset",
+                         rtol: float = 1e-3) -> bool:
+        '''Return True if two datasets share the same navigation grid.
+
+        Checks that navigation axis names, sizes, scales, and offsets all
+        match within a relative tolerance.  Useful for verifying that an XRF
+        map and a DPC map were collected on the same scan grid before
+        overlaying them.
+
+        Parameters
+        ----------
+        other : ScientificDataset
+        rtol : float
+            Relative tolerance for scale/offset comparison.  Default 1e-3.
+        '''
+        self_nav  = self.navigation_axes
+        other_nav = other.navigation_axes
+        if len(self_nav) != len(other_nav):
+            return False
+        for a, b in zip(self_nav, other_nav):
+            if a.name != b.name or a.size != b.size:
+                return False
+            if not np.isclose(a.scale,  b.scale,  rtol=rtol):
+                return False
+            if not np.isclose(a.offset, b.offset, rtol=rtol):
+                return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Apply a function over every navigation position
+    # ------------------------------------------------------------------
+
+    def apply_nav(self, fn, dtype=None, signal_shape=None) -> "ScientificDataset":
+        '''Apply ``fn`` to the signal slice at every navigation position.
+
+        Returns a new :class:`ScientificDataset` whose data is the stacked
+        result.  The result dtype and signal shape are inferred from the
+        first evaluation unless supplied explicitly.
+
+        Parameters
+        ----------
+        fn : callable
+            ``fn(signal_slice: ndarray) -> ndarray or scalar``
+        dtype : numpy dtype, optional
+            Output array dtype.
+        signal_shape : tuple, optional
+            Shape of a single ``fn`` output.
+
+        Example
+        -------
+        ::
+
+            # sum each detector frame → scalar map
+            intensity = ds.apply_nav(lambda frame: frame.sum())
+
+            # centre-of-mass of each frame → (2,) result per position
+            com_map = ds.apply_nav(centre_of_mass, signal_shape=(2,))
+        '''
+        nav_shape = self.navigation_shape
+        flat_nav  = int(np.prod(nav_shape))
+
+        # infer output shape from first call
+        first = fn(self.data.reshape(flat_nav, *self.signal_shape)[0])
+        first = np.asarray(first)
+        if signal_shape is None:
+            signal_shape = first.shape
+        if dtype is None:
+            dtype = first.dtype
+
+        out = np.empty((*nav_shape, *signal_shape), dtype=dtype)
+        flat_data = self.data.reshape(flat_nav, *self.signal_shape)
+        flat_out  = out.reshape(flat_nav, *signal_shape)
+        for i in range(flat_nav):
+            flat_out[i] = fn(flat_data[i])
+
+        # new axes: same nav axes + new signal axes (unnamed, size from shape)
+        new_axes = [Axis(ax.name, ax.size, ax.navigate,
+                         ax.scale, ax.offset, ax.units)
+                    for ax in self.navigation_axes]
+        new_axes += [Axis(f"result_{i}", s, navigate=False)
+                     for i, s in enumerate(signal_shape)]
+
+        return ScientificDataset(
+            data        = out,
+            axes        = new_axes,
+            signal_type = self.signal_type,
+            metadata    = self.metadata.copy(),
+        )
+
+    # ------------------------------------------------------------------
     # Repr
     # ------------------------------------------------------------------
 

@@ -688,3 +688,65 @@ def phase_retrieval(dx, dy, calX=1.0, calY=1.0, method="kottler",
         retrieved = retrieved[: M // 2, : N // 2]
 
     return retrieved
+
+
+# ---------------------------------------------------------------------------
+# ScientificDataset-aware convenience wrapper
+# ---------------------------------------------------------------------------
+
+def phase_retrieval_from(gradient_ds, method="kottler", mirroring=False,
+                         mirror_flip=False):
+    '''Retrieve phase from a gradient :class:`~io_schema.ScientificDataset`.
+
+    Reads ``calX`` and ``calY`` directly from the dataset's navigation axes
+    so they do not need to be supplied manually.  The dataset must have
+    exactly two navigation axes (y, x) and two signal axes of size 2
+    carrying [dy, dx] at each scan point, e.g. as produced by
+    :meth:`~io_schema.ScientificDataset.apply_nav` with ``centre_of_mass``.
+
+    Parameters
+    ----------
+    gradient_ds : ScientificDataset
+        Shape ``(scan_y, scan_x, 2)`` where ``data[..., 0]`` is ``dy`` and
+        ``data[..., 1]`` is ``dx``.
+    method : str
+        Phase retrieval method.  Default ``'kottler'``.
+    mirroring : bool
+        Apply anti-symmetric mirroring.  Default False.
+    mirror_flip : bool
+        Flip mirroring sign convention.  Default False.
+
+    Returns
+    -------
+    ScientificDataset
+        Scalar map (``signal_dimension=0``) of the retrieved phase in rad,
+        with the same navigation axes as the input.
+    '''
+    from io_schema import Axis, ScientificDataset
+
+    nav = gradient_ds.navigation_axes
+    if len(nav) < 2:
+        raise ValueError(
+            "gradient_ds must have at least 2 navigation axes (y, x). "
+            f"Got: {[a.name for a in nav]}"
+        )
+    calY = nav[0].scale   # metres per scan step in y
+    calX = nav[1].scale   # metres per scan step in x
+
+    dy = gradient_ds.data[..., 0]
+    dx = gradient_ds.data[..., 1]
+
+    phase = phase_retrieval(dx, dy, calX=calX, calY=calY,
+                            method=method, mirroring=mirroring,
+                            mirror_flip=mirror_flip)
+
+    nav_axes = [Axis(ax.name, ax.size, navigate=True,
+                     scale=ax.scale, offset=ax.offset, units=ax.units)
+                for ax in nav]
+
+    return ScientificDataset(
+        data        = phase.real.astype(np.float32),
+        axes        = nav_axes,
+        signal_type = "DPC_phase",
+        metadata    = gradient_ds.metadata.copy(),
+    )
