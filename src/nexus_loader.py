@@ -441,9 +441,13 @@ def _read_strlist(obj, key) -> list[str]:
     if val is None:
         return []
     if isinstance(val, (str, bytes, np.bytes_)):
-        return [val.decode() if isinstance(val, (bytes, np.bytes_)) else val]
-    return [v.decode() if isinstance(v, (bytes, np.bytes_)) else str(v)
-            for v in val]
+        s = val.decode() if isinstance(val, (bytes, np.bytes_)) else val
+        return [s.rstrip('\x00').strip()]
+    return [
+        (v.decode().rstrip('\x00').strip()
+         if isinstance(v, (bytes, np.bytes_)) else str(v).rstrip('\x00').strip())
+        for v in val
+    ]
 
 
 def _nxdata_to_nxdata(grp: h5py.Group) -> NXData:
@@ -471,26 +475,39 @@ def _nxdata_to_nxdata(grp: h5py.Group) -> NXData:
         signal_type = val.decode() if isinstance(val, bytes) else str(val)
 
     # build dim → axis dataset mapping
+    # Resolution order (highest priority first):
+    #   1. @axes attribute  — explicit per-dim axis names; "." means no axis
+    #   2. @AXISNAME_indices — only for axes named in @axes (avoids monitor
+    #      channels and positioners that spuriously claim all dims)
+    #   3. HDF5 Dimension Scales — last resort
     axes_attr    = _read_strlist(grp, "axes")
     dim_to_axds: dict[int, h5py.Dataset] = {}
 
-    # @AXISNAME_indices attributes
-    for name, obj in grp.items():
-        if not isinstance(obj, h5py.Dataset) or name == signal_name:
+    # Step 1 — @axes list (most reliable)
+    # Track the intended axis name separately from the resolved dataset path,
+    # because @axes entries may be soft links to datasets elsewhere in the file.
+    dim_to_axname: dict[int, str] = {}   # dim → preferred axis name
+    named_axes: set[str] = set()
+    for dim, ax_name in enumerate(axes_attr):
+        if ax_name == ".":
+            continue                      # "." means no axis for this dim
+        named_axes.add(ax_name)
+        if ax_name in grp and isinstance(grp[ax_name], h5py.Dataset):
+            dim_to_axds[dim]   = grp[ax_name]
+            dim_to_axname[dim] = ax_name  # use link name, not target path
+
+    # Step 2 — @AXISNAME_indices only for axes listed in @axes
+    for name in named_axes:
+        if name not in grp or not isinstance(grp[name], h5py.Dataset):
             continue
         idx = grp.attrs.get(f"{name}_indices")
         if idx is not None:
             for d in np.atleast_1d(idx):
-                dim_to_axds[int(d)] = obj
+                d = int(d)
+                if d not in dim_to_axds:   # don't overwrite @axes result
+                    dim_to_axds[d] = grp[name]
 
-    # @axes list
-    for dim, ax_name in enumerate(axes_attr):
-        if ax_name == "." or dim in dim_to_axds:
-            continue
-        if ax_name in grp and isinstance(grp[ax_name], h5py.Dataset):
-            dim_to_axds[dim] = grp[ax_name]
-
-    # HDF5 Dimension Scales fallback
+    # Step 3 — HDF5 Dimension Scales for remaining dims
     for dim in range(ndim):
         if dim in dim_to_axds:
             continue
@@ -507,7 +524,8 @@ def _nxdata_to_nxdata(grp: h5py.Group) -> NXData:
         ax_ds = dim_to_axds.get(dim)
         if ax_ds is not None:
             coords   = ax_ds[()]
-            name     = ax_ds.name.split("/")[-1]
+            # prefer the name from @axes (handles soft links correctly)
+            name     = dim_to_axname.get(dim, ax_ds.name.split("/")[-1])
             units    = _read_str(ax_ds, "units") or ""
             nav_attr = ax_ds.attrs.get("navigate")
             if nav_attr is not None:
