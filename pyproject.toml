@@ -23,7 +23,6 @@ dependencies = [
     "numpy",
     "scipy",
     "scikit-image",
-    "numba",
     "h5py",
     "pyyaml",
     "pillow",
