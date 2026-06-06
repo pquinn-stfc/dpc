@@ -1,0 +1,10 @@
+# Field mapping for Diamond I14 NeXus files.
+# Keys must match DPCDataset field names; values are HDF5 dataset paths.
+# Any extra keys are stored in DPCDataset.metadata.
+
+frames:            /entry/instrument/merlin/data
+beam_energy:       /entry/instrument/monochromator/energy
+detector_distance: /entry/instrument/merlin/distance
+pixel_size:        /entry/instrument/merlin/pixel_size
+scan_step_x:       /entry/scan/sample_x/step_size
+scan_step_y:       /entry/scan/sample_y/step_size
