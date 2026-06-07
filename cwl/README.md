@@ -9,9 +9,49 @@ Two runners are tested here: **cwltool** (the reference implementation) and
 
 | File | Purpose |
 |------|---------|
-| `dpc_tool.cwl` | The CWL tool definition |
-| `i14_264401_job.yml` | Example job input (the i14-264401 scan) |
+| `dpc_tool.cwl` | Single-scan CWL tool definition |
+| `dpc_batch.cwl` | Workflow that scatters the tool over many scans |
+| `make_job.py` | Generate a job YAML from scan **file numbers** |
+| `i14_264401_job.yml` | Hand-written example job (single scan) |
 | `run_toil.sh` | Convenience wrapper for `toil-cwl-runner` |
+
+## Generic usage — just pass file numbers
+
+All I14 scans are named `i14-<NNNNN>.nxs` with data in a sibling
+`i14-<NNNNN>/` directory.  `make_job.py` builds the job YAML from one or
+more scan numbers plus a data root, so you never write paths by hand.
+
+```bash
+# One scan → job for dpc_tool.cwl
+python cwl/make_job.py --data-root ~/Downloads 264401 --format hdf5 png > job.yml
+cwltool --outdir ./out cwl/dpc_tool.cwl job.yml
+
+# Several scans → job for dpc_batch.cwl (one run processes them all)
+python cwl/make_job.py --data-root ~/Downloads 264401 264402 264403 > batch.yml
+cwltool --outdir ./out cwl/dpc_batch.cwl batch.yml
+
+# A contiguous range (inclusive)
+python cwl/make_job.py --data-root ~/Downloads --range 264401 264410 > batch.yml
+cwltool --outdir ./out cwl/dpc_batch.cwl batch.yml
+
+# Force the batch (array) form for a single scan
+python cwl/make_job.py --data-root ~/Downloads 264401 --batch > batch.yml
+```
+
+The script auto-selects the singular `nexus_file` form (for `dpc_tool.cwl`)
+when there is one scan, or the `nexus_files` array form (for
+`dpc_batch.cwl`) when there are several.  It attaches the external-data
+directory as a `secondaryFile` automatically when it exists.
+
+Processing options pass straight through:
+`--method`, `--crop-size`, `--format`, `--full-mask`, `--no-phase`,
+`--debug`, and `--mapping` (defaults to `config/i14_264401_mapping.yaml`).
+
+Why a generator rather than a fully generic YAML?  CWL deliberately keeps
+input files explicit (for provenance and portability) and does not let a
+workflow synthesise arbitrary filesystem paths from a scalar like a scan
+number.  The generator is the idiomatic way to get that ergonomics while
+keeping the job file a faithful, reproducible record of exactly what ran.
 
 ## Prerequisites
 
@@ -70,6 +110,17 @@ toil-cwl-runner \
     --no-prepull \
     --clean always \
     cwl/dpc_tool.cwl cwl/i14_264401_job.yml
+```
+
+### Batch with Toil
+
+The batch workflow runs under Toil too — and this is where Toil shines, as
+each scattered scan can be dispatched to a separate node on a cluster:
+
+```bash
+python cwl/make_job.py --data-root ~/Downloads --range 264401 264410 > batch.yml
+toil-cwl-runner --jobStore ./js --outdir ./out --no-prepull --clean always \
+    cwl/dpc_batch.cwl batch.yml
 ```
 
 ### Toil notes
