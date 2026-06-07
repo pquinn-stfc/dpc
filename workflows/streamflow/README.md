@@ -1,7 +1,7 @@
 # Multi-site execution with StreamFlow
 
 [StreamFlow](https://streamflow.di.unito.it/) runs the **existing** DPC CWL
-(`cwl/dpc_batch.cwl`) unchanged and adds a deployment layer that maps workflow
+(`workflows/cwl/dpc_batch.cwl`) unchanged and adds a deployment layer that maps workflow
 steps to different execution sites — here Google Cloud (GKE), an HPC Slurm
 cluster, and an OpenStack cloud — within a single workflow.
 
@@ -26,7 +26,7 @@ Every site must be able to pull the container.  The local CWL uses a
 locally-built image:
 
 ```yaml
-# cwl/dpc_tool.cwl (local — works only where the image was built)
+# workflows/cwl/dpc_tool.cwl (local — works only where the image was built)
 DockerRequirement:
   dockerImageId: "pquinn-stfc/dpc:latest"
 ```
@@ -60,14 +60,14 @@ Docker image automatically (the host needs Singularity/Apptainer installed).
 ### 3. A job input file
 
 ```bash
-python cwl/make_job.py --data-root ~/Downloads --range 264401 264410 --batch \
-    > cwl/batch_job.yml
+python workflows/cwl/make_job.py --data-root ~/Downloads --range 264401 264410 --batch \
+    > workflows/cwl/batch_job.yml
 ```
 
 ## Run
 
 ```bash
-cd streamflow
+cd workflows/streamflow
 streamflow run streamflow.yml
 ```
 
@@ -99,6 +99,6 @@ StreamFlow earns its keep when a *single workflow* has steps that must run in
 *different* places (e.g. reconstruct on HPC, then post-process on a GPU cloud).
 For the DPC batch — an embarrassingly parallel scatter with no cross-step data
 dependencies — the simpler **Toil partition-per-site** approach
-(`cwl/run_toil.sh` over a per-site scan range) is less machinery for the same
+(`workflows/cwl/run_toil.sh` over a per-site scan range) is less machinery for the same
 result.  Use StreamFlow here mainly if you want one submission and StreamFlow's
 automatic cross-site data handling.

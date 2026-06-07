@@ -23,19 +23,19 @@ more scan numbers plus a data root, so you never write paths by hand.
 
 ```bash
 # One scan → job for dpc_tool.cwl
-python cwl/make_job.py --data-root ~/Downloads 264401 --format hdf5 png > job.yml
-cwltool --outdir ./out cwl/dpc_tool.cwl job.yml
+python workflows/cwl/make_job.py --data-root ~/Downloads 264401 --format hdf5 png > job.yml
+cwltool --outdir ./out workflows/cwl/dpc_tool.cwl job.yml
 
 # Several scans → job for dpc_batch.cwl (one run processes them all)
-python cwl/make_job.py --data-root ~/Downloads 264401 264402 264403 > batch.yml
-cwltool --outdir ./out cwl/dpc_batch.cwl batch.yml
+python workflows/cwl/make_job.py --data-root ~/Downloads 264401 264402 264403 > batch.yml
+cwltool --outdir ./out workflows/cwl/dpc_batch.cwl batch.yml
 
 # A contiguous range (inclusive)
-python cwl/make_job.py --data-root ~/Downloads --range 264401 264410 > batch.yml
-cwltool --outdir ./out cwl/dpc_batch.cwl batch.yml
+python workflows/cwl/make_job.py --data-root ~/Downloads --range 264401 264410 > batch.yml
+cwltool --outdir ./out workflows/cwl/dpc_batch.cwl batch.yml
 
 # Force the batch (array) form for a single scan
-python cwl/make_job.py --data-root ~/Downloads 264401 --batch > batch.yml
+python workflows/cwl/make_job.py --data-root ~/Downloads 264401 --batch > batch.yml
 ```
 
 The script auto-selects the singular `nexus_file` form (for `dpc_tool.cwl`)
@@ -94,14 +94,14 @@ entry is simply omitted — the tool's `secondaryFiles` pattern is marked
 ## Run with cwltool
 
 ```bash
-cwltool --outdir ./cwl_output cwl/dpc_tool.cwl cwl/i14_264401_job.yml
+cwltool --outdir ./cwl_output workflows/cwl/dpc_tool.cwl workflows/cwl/i14_264401_job.yml
 ```
 
 ## Run with Toil
 
 ```bash
 # Convenience wrapper (handles PATH + flags):
-cwl/run_toil.sh ./toil_output
+workflows/cwl/run_toil.sh ./toil_output
 
 # Or directly:
 toil-cwl-runner \
@@ -109,7 +109,7 @@ toil-cwl-runner \
     --outdir ./toil_output \
     --no-prepull \
     --clean always \
-    cwl/dpc_tool.cwl cwl/i14_264401_job.yml
+    workflows/cwl/dpc_tool.cwl workflows/cwl/i14_264401_job.yml
 ```
 
 ### Batch with Toil
@@ -118,9 +118,9 @@ The batch workflow runs under Toil too — and this is where Toil shines, as
 each scattered scan can be dispatched to a separate node on a cluster:
 
 ```bash
-python cwl/make_job.py --data-root ~/Downloads --range 264401 264410 > batch.yml
+python workflows/cwl/make_job.py --data-root ~/Downloads --range 264401 264410 > batch.yml
 toil-cwl-runner --jobStore ./js --outdir ./out --no-prepull --clean always \
-    cwl/dpc_batch.cwl batch.yml
+    workflows/cwl/dpc_batch.cwl batch.yml
 ```
 
 ### Toil notes

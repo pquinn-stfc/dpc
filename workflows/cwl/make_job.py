@@ -66,7 +66,7 @@ def main(argv=None):
     p.add_argument("--data-root", required=True, type=Path,
                    help="Directory containing the i14-*.nxs files")
     p.add_argument("--mapping", type=Path,
-                   default=Path(__file__).parent.parent /
+                   default=Path(__file__).resolve().parents[2] /
                            "config" / "i14_264401_mapping.yaml",
                    help="Field-mapping YAML (default: config/i14_264401_mapping.yaml)")
     p.add_argument("--method", default="kottler",
