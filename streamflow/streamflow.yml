@@ -1,0 +1,125 @@
+# StreamFlow deployment for the DPC pipeline — hybrid multi-site execution.
+#
+# TEMPLATE / SKETCH — validate field names against your installed StreamFlow
+# version (`streamflow version`); the schema has evolved between releases.
+#
+# StreamFlow runs your EXISTING CWL unchanged (cwl/dpc_batch.cwl) and adds a
+# layer that maps workflow steps to execution "deployments".  Here the single
+# scattered step `/dpc` is bound to three sites: Google Cloud (GKE),
+# an HPC Slurm cluster, and an OpenStack cloud (via SSH to a VM).
+#
+# Run with:
+#   cd streamflow && streamflow run streamflow.yml
+#
+# Prerequisites
+#   * The container image must be pullable at every site → use a registry tag
+#     in the CWL DockerRequirement (dockerPull: ghcr.io/pquinn-stfc/dpc:0.1.0),
+#     NOT the local dockerImageId.  See streamflow/README.md.
+#   * Credentials/kubeconfig/ssh keys referenced below must exist locally;
+#     StreamFlow uses them to reach each site.
+
+version: v1.0
+
+# ---------------------------------------------------------------------------
+# Workflow: the CWL is reused as-is; `settings` is the job inputs file.
+# ---------------------------------------------------------------------------
+workflows:
+  dpc:
+    type: cwl
+    config:
+      file: ../cwl/dpc_batch.cwl
+      settings: ../cwl/batch_job.yml      # generate with cwl/make_job.py --batch
+    bindings:
+      # Bind the scattered per-scan step to ALL THREE sites.  StreamFlow's
+      # scheduler then distributes the scattered instances across them.
+      #
+      # NOTE ON DATA LOCALITY (important): StreamFlow stages each scan's
+      # inputs (the .nxs + its ~862 MB external data dir) to wherever the
+      # instance runs.  Free-spreading across clouds therefore moves a lot of
+      # data.  For production, prefer co-location: give each site its OWN
+      # binding over the subset of scans whose data already lives there (see
+      # the commented per-site bindings at the bottom of this file).
+      - step: /dpc
+        target:
+          - deployment: gcp-gke
+            service: dpc
+          - deployment: hpc-slurm
+            service: dpc
+          - deployment: openstack-vm
+            service: dpc
+
+# ---------------------------------------------------------------------------
+# Deployments: one per site.
+# ---------------------------------------------------------------------------
+deployments:
+
+  # ---- 1. Google Cloud — GKE via the Kubernetes connector ----------------
+  # Create the cluster + kubeconfig first, e.g.:
+  #   gcloud container clusters create dpc --num-nodes 4 --machine-type e2-standard-8
+  #   gcloud container clusters get-credentials dpc --region europe-west2 \
+  #       --kubeconfig $HOME/.kube/gke-dpc.config
+  gcp-gke:
+    type: kubernetes
+    config:
+      kubeconfig: ${HOME}/.kube/gke-dpc.config
+      namespace: dpc
+      # StreamFlow launches one pod per scattered job using the CWL
+      # DockerRequirement image; CPU/RAM come from the CWL ResourceRequirement
+      # (ramMin/coresMin in dpc_tool.cwl).  Tune pod placement here if needed:
+      # nodeSelector / tolerations can be added under a pod template.
+
+  # ---- 2. HPC — Slurm via the queue-manager connector --------------------
+  # StreamFlow connects to the login node over SSH and submits with sbatch.
+  # On HPC, containers run under Singularity (Docker is usually disallowed);
+  # StreamFlow converts the DockerRequirement image automatically.
+  hpc-slurm:
+    type: slurm
+    config:
+      hostname: login.hpc.example.ac.uk
+      username: pquinn
+      sshKey: ${HOME}/.ssh/id_rsa
+      # Per-step sbatch parameters live under services (referenced by the
+      # binding's `service: dpc` above):
+      services:
+        dpc:
+          partition: cpu
+          nodes: 1
+          ntasks: 1
+          cpusPerTask: 8
+          mem: 8G
+          time: "01:00:00"
+          # account: your-project-code
+
+  # ---- 3. OpenStack — SSH connector to a provisioned VM ------------------
+  # OpenStack has no dedicated StreamFlow connector; the two practical routes
+  # are (a) SSH to a VM that has Docker/Singularity (shown), or (b) run
+  # Kubernetes on OpenStack (Magnum) and use the kubernetes connector exactly
+  # like gcp-gke above.  Provision the VM(s) with `openstack server create`
+  # and ensure Singularity (or Docker) is installed.
+  openstack-vm:
+    type: ssh
+    config:
+      nodes:
+        - dpc-worker-1.openstack.example
+        - dpc-worker-2.openstack.example
+      username: ubuntu
+      sshKey: ${HOME}/.ssh/openstack-dpc.pem
+      # StreamFlow runs the step inside the CWL container on these hosts.
+      # Set the container runtime if not Docker:
+      # checkHostKey: false
+
+# ---------------------------------------------------------------------------
+# RECOMMENDED ALTERNATIVE — data-local, per-site bindings.
+# Instead of one /dpc bound to three sites (which moves data around), run a
+# separate StreamFlow file per site binding /dpc to that site only, over the
+# subset of scans whose data is already there.  E.g. for the HPC site:
+#
+#   bindings:
+#     - step: /dpc
+#       target:
+#         deployment: hpc-slurm
+#         service: dpc
+#
+# with cwl/make_job.py emitting only that site's scan numbers.  This keeps
+# the 862 MB/scan detector data next to the compute.
+# ---------------------------------------------------------------------------
