@@ -27,9 +27,13 @@ dependencies = [
     "pyyaml",
     "pillow",
     "matplotlib",
+    "nexus-io",
 ]
 
 [project.optional-dependencies]
+mcp = [
+    "mcp",
+]
 dev = [
     "pytest",
     "pytest-cov",

@@ -13,9 +13,9 @@ services:
   # -----------------------------------------------------------------------
   dpc:
     build:
-      context: .
-      dockerfile: Dockerfile
-    image: dpc:latest
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: pquinn-stfc/dpc:latest
     volumes:
       - ${DATA_DIR:-./data}:/data:ro          # input NeXus files (read-only)
       - ${RESULTS_DIR:-./results}:/results    # output HDF5 / images
@@ -36,9 +36,9 @@ services:
   # -----------------------------------------------------------------------
   dpc-batch:
     build:
-      context: .
-      dockerfile: Dockerfile
-    image: dpc:latest
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: pquinn-stfc/dpc:latest
     volumes:
       - ${DATA_DIR:-./data}:/data:ro
       - ${RESULTS_DIR:-./results}:/results

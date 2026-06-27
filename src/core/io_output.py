@@ -1,4 +1,8 @@
-'''Save DPC results to HDF5 (NeXus) and/or image files (PNG / TIFF).'''
+'''Save DPC results to HDF5 (NeXus) and/or image files (PNG / TIFF).
+
+Generic :func:`save_nxdata` is re-exported from :mod:`nexus_io`.
+DPC-specific :func:`save_hdf5` and :func:`save_images` are defined here.
+'''
 
 from __future__ import annotations
 
@@ -8,6 +12,8 @@ from typing import Optional
 
 import h5py
 import numpy as np
+
+from nexus_io import save_nxdata  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -244,76 +250,3 @@ def _normalise_u8(arr: np.ndarray) -> np.ndarray:
     if hi == lo:
         return np.zeros_like(a, dtype=np.uint8)
     return ((a - lo) / (hi - lo) * 255).astype(np.uint8)
-
-
-# ---------------------------------------------------------------------------
-# NXData → HDF5
-# ---------------------------------------------------------------------------
-
-def save_nxdata(
-    path: str | Path,
-    ds,
-    compression: str = "gzip",
-):
-    '''Save an :class:`~io_schema.NXData` to a NeXus HDF5 file.
-
-    Axes are written as 1-D datasets and attached as HDF5 Dimension Scales
-    so any NeXus-aware viewer (silx, h5web, NeXpy) assigns correct physical
-    axis labels automatically.
-
-    Parameters
-    ----------
-    path : path-like
-        Output file path.
-    ds : NXData
-        Dataset to save.
-    compression : str
-        HDF5 compression filter.  Default ``'gzip'``.
-    '''
-    from datetime import datetime, timezone
-
-    with h5py.File(path, "w") as f:
-        entry = f.create_group("entry")
-        entry.attrs["NX_class"] = "NXentry"
-        entry.create_dataset("definition",   data="NXdata")
-        entry.create_dataset("program_name", data="dpc")
-        entry.create_dataset("start_time",
-                             data=datetime.now(timezone.utc).isoformat())
-        entry.create_dataset("signal_type",  data=ds.signal_type)
-
-        # metadata scalars
-        if ds.metadata:
-            meta = entry.create_group("metadata")
-            meta.attrs["NX_class"] = "NXcollection"
-            for k, v in ds.metadata.items():
-                try:
-                    meta.create_dataset(k, data=v)
-                except TypeError:
-                    meta.create_dataset(k, data=str(v))
-
-        # primary NXdata group
-        nxdata = entry.create_group("data")
-        nxdata.attrs["NX_class"] = "NXdata"
-        nxdata.attrs["signal"]   = "data"
-        nxdata.attrs["axes"]     = [ax.name for ax in ds.axes]
-
-        # write each axis as a dimension scale (full coordinate array)
-        ax_datasets = []
-        for ax in ds.axes:
-            ax_ds = nxdata.create_dataset(ax.name,
-                                          data=ax.values.astype(np.float64))
-            ax_ds.attrs["units"]      = ax.units
-            ax_ds.attrs["long_name"]  = ax.name
-            ax_ds.attrs["navigate"]   = ax.navigate
-            ax_ds.attrs["is_uniform"] = ax.is_uniform
-            if ax.is_uniform:
-                ax_ds.attrs["step_size"] = ax.step_size
-            ax_ds.make_scale(ax.name)
-            ax_datasets.append(ax_ds)
-
-        # write main data and attach dimension scales
-        data_ds = nxdata.create_dataset(
-            "data", data=ds.data, compression=compression
-        )
-        for i, ax_ds in enumerate(ax_datasets):
-            data_ds.dims[i].attach_scale(ax_ds)

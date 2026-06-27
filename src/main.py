@@ -62,13 +62,13 @@ def parse_args(argv=None):
 def run(args):
     # Import here so the module works as a library without heavy imports at
     # the top level.
-    sys.path.insert(0, str(Path(__file__).parent / 'src'))
+    sys.path.insert(0, str(Path(__file__).parent))
 
-    from hdf5_loader import load_dpc
-    from dpc_tools import get_beam, crop_beam, get_dark_field_mask, centre_of_mass
-    from mask_tools import build_pixel_mask
-    from dpc_recon import phase_grad_norm, phase_retrieval
-    from outlier_removal_tools import median_subtraction
+    from core.hdf5_loader import load_dpc
+    from core.dpc_tools import get_beam, crop_beam, get_dark_field_mask, centre_of_mass
+    from core.mask_tools import build_pixel_mask
+    from core.dpc_recon import phase_grad_norm, phase_retrieval
+    from core.outlier_removal_tools import median_subtraction
 
     # ------------------------------------------------------------------
     # 1. Load dataset (lazy — frames stay on disk until indexed)
@@ -181,7 +181,7 @@ def run(args):
     # ------------------------------------------------------------------
     # 8. Save results
     # ------------------------------------------------------------------
-    from io_output import save_hdf5, save_images
+    from core.io_output import save_hdf5, save_images
 
     if args.output is not None:
         base = Path(args.output)
@@ -228,7 +228,7 @@ def run(args):
     # 9. Debug figure
     # ------------------------------------------------------------------
     if args.debug:
-        from visualisation import save_debug
+        from core.visualisation import save_debug
         save_debug(
             base,
             sample_frame      = sample_frame,

@@ -11,10 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         g++ \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml .
 # Install all declared dependencies into a prefix we can copy across
 RUN pip install --no-cache-dir --prefix=/install \
-        numpy scipy scikit-image h5py pyyaml pillow matplotlib
+        numpy scipy scikit-image h5py pyyaml pillow matplotlib nexus-io
 
 
 # ---- runtime stage ----
@@ -31,9 +30,9 @@ COPY --from=builder /install /usr/local
 WORKDIR /app
 
 # Copy source and entry point
-COPY src/   ./src/
-COPY main.py .
-COPY config/ ./config/
+COPY src   ./src/
+COPY src/main.py .
+COPY config ./config/
 
 # Ensure src/ is on the Python path
 ENV PYTHONPATH="/app/src"
